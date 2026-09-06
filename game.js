@@ -326,6 +326,7 @@ function startMatch() {
   botClashTimer = 8;
   for (const d of dyingBots) scene.remove(d.mesh);
   dyingBots = [];
+  duelers = [];
   msgLog = [];
   logMsg(`매치 시작! 당신의 팀: ${playerTeam.def.name}`);
   requestPointerLock();
@@ -655,11 +656,30 @@ function useItem() {
 }
 
 /* ------------------------------ BOT AI + PERIODIC CLASHES ------------------------------ */
+let duelers = []; // { bot, home, phase:'approach'|'hold'|'return', t }
+
 function updateBots(dt) {
   for (const bot of bots) {
     if (!bot.alive) continue;
-    bot.mesh.position.x += Math.sin(performance.now() * 0.0003 + bot.mesh.id) * dt * 0.3;
-    bot.mesh.position.z += Math.cos(performance.now() * 0.00025 + bot.mesh.id) * dt * 0.3;
+    if (bot.duel) continue; // handled by updateDuelers
+    if (!bot.wanderTarget || bot.wanderTimer === undefined) bot.wanderTimer = 0;
+    bot.wanderTimer -= dt;
+    if (bot.wanderTimer <= 0) {
+      bot.wanderTimer = 2 + Math.random() * 3;
+      const team = teams.find(t => t.key === bot.teamKey);
+      const home = team ? team.pos : bot.mesh.position;
+      bot.wanderTarget = new THREE.Vector3(
+        home.x + (Math.random() - 0.5) * 12,
+        1,
+        home.z + (Math.random() - 0.5) * 12
+      );
+    }
+    const to = new THREE.Vector3().subVectors(bot.wanderTarget, bot.mesh.position);
+    to.y = 0;
+    if (to.lengthSq() > 0.04) {
+      to.normalize().multiplyScalar(dt * 1.6);
+      bot.mesh.position.add(to);
+    }
   }
 }
 
@@ -673,7 +693,41 @@ function updateBotClashes(dt) {
       let b = alive[Math.floor(Math.random() * alive.length)];
       let tries = 0;
       while (b === a && tries++ < 5) b = alive[Math.floor(Math.random() * alive.length)];
-      if (a !== b) clashTeams(a, b, false);
+      if (a !== b) startDuel(a, b);
+    }
+  }
+}
+
+function startDuel(teamA, teamB) {
+  const mid = new THREE.Vector3().addVectors(teamA.pos, teamB.pos).multiplyScalar(0.5);
+  const botA = teamA.players.find(b => b.alive && !b.duel);
+  const botB = teamB.players.find(b => b.alive && !b.duel);
+  const reps = [botA, botB].filter(Boolean);
+  for (const bot of reps) {
+    bot.duel = true;
+    duelers.push({ bot, home: bot.mesh.position.clone(), mid: mid.clone(), phase: 'approach', t: 0 });
+  }
+  // resolve the actual clash once they've had time to "meet" (or immediately if no reps available)
+  setTimeout(() => clashTeams(teamA, teamB, false), reps.length > 0 ? 900 : 0);
+}
+
+function updateDuelers(dt) {
+  for (let i = duelers.length - 1; i >= 0; i--) {
+    const d = duelers[i];
+    if (!d.bot.alive) { duelers.splice(i, 1); continue; }
+    d.t += dt;
+    if (d.phase === 'approach') {
+      const dur = 0.9;
+      const k = Math.min(1, d.t / dur);
+      d.bot.mesh.position.lerpVectors(d.home, d.mid, k);
+      if (k >= 1) { d.phase = 'hold'; d.t = 0; }
+    } else if (d.phase === 'hold') {
+      if (d.t >= 0.4) { d.phase = 'return'; d.t = 0; }
+    } else if (d.phase === 'return') {
+      const dur = 0.9;
+      const k = Math.min(1, d.t / dur);
+      d.bot.mesh.position.lerpVectors(d.mid, d.home, k);
+      if (k >= 1) { d.bot.duel = false; duelers.splice(i, 1); }
     }
   }
 }
@@ -773,6 +827,7 @@ function animate() {
     updateTimedEffects(dt);
     updateEffectMeshes(dt);
     updateDyingBots(dt);
+    updateDuelers(dt);
     updateHud();
 
     matchTimeLeft -= dt;
