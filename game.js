@@ -422,15 +422,10 @@ function startMatch() {
   teams = [];
   if (playerObj && playerObj.mesh) scene.remove(playerObj.mesh);
 
-  const teamSize = selectedRoom.size;
-  // Team modes (2/2+): a clear 2-side battle (my team vs one rival team) so the
-  // fight is always nearby and visible. Solo mode (1/1): a 7-way free-for-all,
-  // one team per item, matching the "개인전" ranking-by-item design.
-  const activeKeys = selectedRoom.team
-    ? [selectedItem, ...ITEM_KEYS.filter(k => k !== selectedItem).sort(() => Math.random() - 0.5).slice(0, 1)]
-    : ITEM_KEYS;
+  const teamSize = selectedRoom.size; // room size = players per team (always 7 teams, one per item)
+  const activeKeys = ITEM_KEYS;
   const numTeams = activeKeys.length;
-  const radius = selectedRoom.team ? 22 : 45;
+  const radius = 26; // close enough that all 7 towers' activity stays visible
 
   activeKeys.forEach((key, i) => {
     const ang = (i / numTeams) * Math.PI * 2;
@@ -465,7 +460,7 @@ function startMatch() {
   tornado.active = false;
   fireZone.active = false;
   snowTimeLeft = 0;
-  botClashTimer = selectedRoom.team ? 4 : 8;
+  botClashTimer = 4;
   for (const d of dyingBots) scene.remove(d.mesh);
   dyingBots = [];
   duelers = [];
@@ -480,10 +475,46 @@ function buildTower(team) {
     team.towerGroup.remove(team.towerGroup.children[0]);
   }
   const mat = new THREE.MeshStandardMaterial({ color: team.color });
+  const darkMat = new THREE.MeshStandardMaterial({ color: 0x2a2a2e, metalness: 0.4, roughness: 0.6 });
+  const treadMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1c, metalness: 0.5, roughness: 0.5 });
+
+  // a lava pit glowing at the base of the factory, where the caterpillar treads drop boxes in
+  const lava = new THREE.Mesh(
+    new THREE.CircleGeometry(3.2, 24),
+    new THREE.MeshStandardMaterial({ color: 0xff5522, emissive: 0xff3300, emissiveIntensity: 1.2 })
+  );
+  lava.rotation.x = -Math.PI / 2;
+  lava.position.y = 0.03;
+  team.towerGroup.add(lava);
+  team.lavaMesh = lava;
+
+  // two caterpillar tread rails flanking the tower, height grows with floor count
+  const towerHeight = team.floors * 2;
+  [-2.6, 2.6].forEach(xOff => {
+    const tread = new THREE.Mesh(new THREE.BoxGeometry(0.7, towerHeight, 1.4), treadMat);
+    tread.position.set(xOff, towerHeight / 2, 0);
+    team.towerGroup.add(tread);
+    // tread segments (the "caterpillar" cross-bars)
+    const segCount = Math.max(2, Math.floor(towerHeight / 0.8));
+    for (let s = 0; s < segCount; s++) {
+      const bar = new THREE.Mesh(new THREE.BoxGeometry(0.75, 0.15, 1.5), darkMat);
+      bar.position.set(xOff, s * (towerHeight / segCount) + 0.2, 0);
+      team.towerGroup.add(bar);
+    }
+  });
+
+  // factory floors, each with a small staircase up to the next floor
   for (let f = 0; f < team.floors; f++) {
     const box = new THREE.Mesh(new THREE.BoxGeometry(4, 2, 4), mat);
     box.position.y = f * 2 + 1;
     team.towerGroup.add(box);
+
+    const stepCount = 4;
+    for (let s = 0; s < stepCount; s++) {
+      const step = new THREE.Mesh(new THREE.BoxGeometry(1, 0.3, 0.9), darkMat);
+      step.position.set(2.3, f * 2 + (s + 1) * (2 / stepCount) - 0.15, 1.5 - s * 0.5);
+      team.towerGroup.add(step);
+    }
   }
 }
 
@@ -716,7 +747,7 @@ function swordThrust() {
   if (hits.length > 0) {
     SFX.swordHit();
     const bot = findBotByHitObject(hits[0].object);
-    if (bot) resolvePlayerHit(bot);
+    if (bot) stunThenKill(bot);
   } else if (objHits.length > 0) {
     spawnStuckKnife(objHits[0].point, ray.ray.direction);
     SFX.swordWhiff();
@@ -735,7 +766,7 @@ function swordThrow() {
   if (hits.length > 0) {
     SFX.swordHit();
     const bot = findBotByHitObject(hits[0].object);
-    if (bot) resolvePlayerHit(bot);
+    if (bot) stunThenKill(bot);
     logMsg('던진 칼이 명중했습니다!');
   } else {
     SFX.swordWhiff();
@@ -757,6 +788,20 @@ function resolvePlayerHit(bot) {
   clashTeams(playerTeam, targetTeam, true);
   // remove the specific bot hit either way (they were struck directly)
   removeBot(bot);
+}
+
+// Sword hits freeze the target in place for a beat before they die, instead of
+// vanishing immediately like a gunshot.
+function stunThenKill(bot) {
+  if (!bot.alive || bot.stunned) return;
+  bot.stunned = true;
+  const flashMat = bot.mesh.children[0] && bot.mesh.children[0].material;
+  const origEmissive = flashMat && flashMat.emissive ? flashMat.emissive.clone() : null;
+  if (flashMat) { flashMat.emissive = new THREE.Color(0xffffff); flashMat.emissiveIntensity = 0.8; }
+  setTimeout(() => {
+    if (!bot.alive) return;
+    resolvePlayerHit(bot);
+  }, 700);
 }
 
 let dyingBots = []; // { mesh, t }
@@ -781,6 +826,52 @@ function updateDyingBots(dt) {
       dyingBots.splice(i, 1);
     }
   }
+}
+
+// A small sphere that flies from one tower to another over `duration` seconds, then pops.
+function spawnProjectile(fromPos, toPos, color, duration, size) {
+  const mesh = new THREE.Mesh(
+    new THREE.SphereGeometry(size || 0.6, 10, 10),
+    new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.6 })
+  );
+  const from = fromPos.clone(); from.y = 4;
+  const to = toPos.clone(); to.y = 2;
+  mesh.position.copy(from);
+  scene.add(mesh);
+  let t = 0;
+  const step = () => {
+    t += 0.045;
+    const k = Math.min(1, t / duration);
+    mesh.position.lerpVectors(from, to, k);
+    mesh.position.y += Math.sin(k * Math.PI) * 3; // arc
+    if (k < 1) requestAnimationFrame(step);
+    else { scene.remove(mesh); spawnClashFlash(toPos, toPos); }
+  };
+  step();
+}
+
+// A brief vertical lightning bolt striking a tower
+function spawnLightningBolt(pos) {
+  const points = [];
+  let x = 0, y = 10;
+  while (y > 0) {
+    points.push(new THREE.Vector3(pos.x + x, y, pos.z));
+    y -= 1.5;
+    x += (Math.random() - 0.5) * 1.2;
+  }
+  points.push(new THREE.Vector3(pos.x, 0, pos.z));
+  const geo = new THREE.BufferGeometry().setFromPoints(points);
+  const mat = new THREE.LineBasicMaterial({ color: 0xfff066, transparent: true, opacity: 1 });
+  const bolt = new THREE.Line(geo, mat);
+  scene.add(bolt);
+  let t = 0;
+  const fade = () => {
+    t += 0.05;
+    mat.opacity = Math.max(0, 1 - t * 3);
+    if (t < 0.35) requestAnimationFrame(fade);
+    else { scene.remove(bolt); geo.dispose(); mat.dispose(); }
+  };
+  fade();
 }
 
 function spawnClashFlash(posA, posB) {
@@ -872,7 +963,11 @@ function useItem() {
       break;
     }
     case 'electric': {
-      others.forEach(t => { t.power = Math.max(0, t.power * 0.8); checkElimination(t); });
+      others.forEach(t => {
+        t.power = Math.max(0, t.power * 0.8);
+        spawnLightningBolt(t.pos);
+        checkElimination(t);
+      });
       logMsg(`${playerTeam.def.name} 팀이 감전 능력을 사용해 모든 팀의 힘을 20% 감소시켰습니다!`);
       break;
     }
@@ -896,7 +991,11 @@ function useItem() {
     case 'rock': {
       for (let i = 0; i < 2; i++) {
         const t = others[Math.floor(Math.random() * others.length)];
-        if (t) { t.power = Math.max(0, t.power * 0.9); checkElimination(t); }
+        if (t) {
+          t.power = Math.max(0, t.power * 0.9);
+          spawnProjectile(playerTeam.pos, t.pos, 0x8a7a68, 0.6, 0.7);
+          checkElimination(t);
+        }
       }
       logMsg(`${playerTeam.def.name} 팀이 돌 2개를 날려 다른 탑을 공격했습니다! (각 10% 감소)`);
       break;
@@ -909,7 +1008,11 @@ function useItem() {
     case 'water': {
       if (fireZone.active) {
         const fTeam = teams.find(t => t.key === fireZone.teamKey);
-        if (fTeam) { fTeam.power = Math.max(0, fTeam.power * 0.7); checkElimination(fTeam); }
+        if (fTeam) {
+          fTeam.power = Math.max(0, fTeam.power * 0.7);
+          spawnProjectile(playerTeam.pos, fTeam.pos, 0x3399ff, 0.5, 0.8);
+          checkElimination(fTeam);
+        }
         fireZone.active = false;
         logMsg(`${playerTeam.def.name} 팀이 물 10L를 불탑에 뿌려 불을 껐습니다! 불탑 힘 30% 감소.`);
       } else {
@@ -919,7 +1022,11 @@ function useItem() {
     }
     case 'bug': {
       const t = others[Math.floor(Math.random() * others.length)];
-      if (t) { t.power = Math.max(0, t.power * 0.85); checkElimination(t); }
+      if (t) {
+        t.power = Math.max(0, t.power * 0.85);
+        spawnProjectile(playerTeam.pos, t.pos, 0x77aa33, 0.7, 0.4);
+        checkElimination(t);
+      }
       logMsg(`${playerTeam.def.name} 팀이 벌레떼를 보내 ${t ? t.def.name : ''} 팀의 힘을 15% 감소시켰습니다!`);
       break;
     }
@@ -933,7 +1040,7 @@ let duelers = []; // { bot, home, phase:'approach'|'hold'|'return', t }
 function updateBots(dt) {
   for (const bot of bots) {
     if (!bot.alive) continue;
-    if (bot.duel) continue; // handled by updateDuelers
+    if (bot.duel || bot.stunned) continue; // handled by updateDuelers / frozen by a sword hit
     if (!bot.wanderTarget || bot.wanderTimer === undefined) bot.wanderTimer = 0;
     bot.wanderTimer -= dt;
     if (bot.wanderTimer <= 0) {
@@ -959,8 +1066,7 @@ function updateBotClashes(dt) {
   botClashTimer -= dt;
   if (botClashTimer <= 0) {
     // fewer teams (2-team battles) clash more often so the fight stays active and visible
-    const base = teams.length <= 2 ? 5 : 10;
-    botClashTimer = base + Math.random() * 4;
+    botClashTimer = 4 + Math.random() * 3;
     const alive = teams.filter(t => t.alive);
     if (alive.length >= 2) {
       const a = alive[Math.floor(Math.random() * alive.length)];
@@ -1109,8 +1215,9 @@ function animate() {
     updateHud();
 
     matchTimeLeft -= dt;
-    if (matchTimeLeft <= 0) {
-      matchTimeLeft = 0;
+    const aliveTeams = teams.filter(t => t.alive);
+    if (matchTimeLeft <= 0 || aliveTeams.length <= 1) {
+      matchTimeLeft = Math.max(0, matchTimeLeft);
       endMatch();
     }
   }
