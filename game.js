@@ -35,6 +35,62 @@ let botClashTimer = 0;
 let tornado = { active: false, timeLeft: 0, teamKey: null, targetKey: null };
 let fireZone = { active: false, timeLeft: 0, teamKey: null };
 let msgLog = [];
+let fireMesh = null, tornadoMesh = null, snowGroup = null, snowTimeLeft = 0;
+
+function initEffectMeshes() {
+  fireMesh = new THREE.Mesh(
+    new THREE.SphereGeometry(2.5, 16, 16),
+    new THREE.MeshStandardMaterial({ color: 0xff5511, emissive: 0xff4400, emissiveIntensity: 0.8 })
+  );
+  fireMesh.position.set(0, 2.5, 0);
+  fireMesh.visible = false;
+  scene.add(fireMesh);
+
+  tornadoMesh = new THREE.Mesh(
+    new THREE.ConeGeometry(3, 12, 12, 1, true),
+    new THREE.MeshStandardMaterial({ color: 0xdfefff, transparent: true, opacity: 0.55, side: THREE.DoubleSide })
+  );
+  tornadoMesh.visible = false;
+  scene.add(tornadoMesh);
+
+  snowGroup = new THREE.Group();
+  const snowGeo = new THREE.SphereGeometry(0.08, 4, 4);
+  const snowMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  for (let i = 0; i < 200; i++) {
+    const flake = new THREE.Mesh(snowGeo, snowMat);
+    flake.position.set((Math.random() - 0.5) * 60, Math.random() * 20, (Math.random() - 0.5) * 60);
+    snowGroup.add(flake);
+  }
+  snowGroup.visible = false;
+  scene.add(snowGroup);
+}
+
+function updateEffectMeshes(dt) {
+  if (fireMesh) {
+    fireMesh.visible = fireZone.active;
+    if (fireZone.active) fireMesh.rotation.y += dt * 2;
+  }
+  if (tornadoMesh) {
+    tornadoMesh.visible = tornado.active;
+    if (tornado.active) {
+      const targetTeam = teams.find(t => t.key === tornado.targetKey);
+      if (targetTeam) tornadoMesh.position.set(targetTeam.pos.x, 6, targetTeam.pos.z);
+      tornadoMesh.rotation.y += dt * 6;
+    }
+  }
+  if (snowGroup) {
+    if (snowTimeLeft > 0) {
+      snowTimeLeft -= dt;
+      snowGroup.visible = true;
+      for (const flake of snowGroup.children) {
+        flake.position.y -= dt * 3;
+        if (flake.position.y < 0) flake.position.y = 20;
+      }
+    } else {
+      snowGroup.visible = false;
+    }
+  }
+}
 
 const overlay = document.getElementById('overlay');
 const hud = document.getElementById('hud');
@@ -84,6 +140,7 @@ function initThree() {
   }
 
   clock = new THREE.Clock();
+  initEffectMeshes();
   window.addEventListener('resize', onResize);
   animate();
 }
@@ -195,6 +252,7 @@ function startMatch() {
   weapon = null;
   tornado.active = false;
   fireZone.active = false;
+  snowTimeLeft = 0;
   botClashTimer = 8;
   msgLog = [];
   logMsg(`매치 시작! 당신의 팀: ${playerTeam.def.name}`);
@@ -226,13 +284,13 @@ function spawnBot(team) {
 }
 
 function spawnPlayer(nearPos) {
-  playerObj = {
-    pos: new THREE.Vector3(nearPos.x + 3, 1.7, nearPos.z + 3),
-    vel: new THREE.Vector3(),
-    onGround: true,
-  };
+  // spawn a bit toward the arena center so we don't clip into our own tower
+  const toCenter = new THREE.Vector3(-nearPos.x, 0, -nearPos.z).normalize();
+  const spawnPos = new THREE.Vector3(nearPos.x, 1.7, nearPos.z).addScaledVector(toCenter, 8);
+  playerObj = { pos: spawnPos, vel: new THREE.Vector3(), onGround: true };
   camera.position.copy(playerObj.pos);
-  yaw = 0; pitch = 0;
+  yaw = Math.atan2(toCenter.x, toCenter.z) + Math.PI;
+  pitch = 0;
 }
 
 /* ------------------------------ INPUT ------------------------------ */
@@ -418,6 +476,7 @@ function useItem() {
       break;
     }
     case 'ice': {
+      snowTimeLeft = 10;
       if (tornado.active) {
         tornado.active = false;
         const tTeam = teams.find(t => t.key === tornado.teamKey);
@@ -580,6 +639,7 @@ function animate() {
     updateBots(dt);
     updateBotClashes(dt);
     updateTimedEffects(dt);
+    updateEffectMeshes(dt);
     updateHud();
 
     matchTimeLeft -= dt;
