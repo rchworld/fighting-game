@@ -46,9 +46,13 @@ const SFX = {
   matchEnd: () => sfx(220, 0.6, 'sine', 0.16),
 };
 
-let phase = 'LOBBY';
+let phase = 'MODE_SELECT';
+let gameMode = 'VARIANT'; // 'VARIANT' (아이템/탑/랭킹) | 'NORMAL' (총검만 있는 단순 난투)
 let scene, camera, renderer, clock;
 let floor, skyFog;
+let obstacleBoxes = [];
+let normalScore = 0;
+let cabinGroup = null;
 let teams = [];          // { key, def, power, floors, alive, players:[], color, towerMesh, towerGroup }
 let playerTeam = null;
 let playerObj = null;    // { mesh, vel, onGround, weapon, hp }
@@ -56,6 +60,7 @@ let bots = [];           // { mesh, teamKey, wanderTarget }
 let keys = {};
 let yaw = 0, pitch = 0;
 let pointerLocked = false;
+let playerClimb = 0; // 0..1, how far up a tower's stairway the player currently is
 let weapon = null;       // null | 'gun' | 'sword'
 let itemCooldownLeft = 0;
 let matchTimeLeft = MATCH_SECONDS;
@@ -155,7 +160,8 @@ function initThree() {
   floor.rotation.x = -Math.PI / 2;
   scene.add(floor);
 
-  // scattered dreamlike brown boxes
+  // scattered dreamlike brown boxes (변형/Variant arena decoration)
+  obstacleBoxes = [];
   for (let i = 0; i < 40; i++) {
     const s = 1 + Math.random() * 2;
     const box = new THREE.Mesh(
@@ -167,6 +173,7 @@ function initThree() {
     box.position.set(Math.cos(ang) * rad, s / 2, Math.sin(ang) * rad);
     box.userData.isObstacle = true;
     scene.add(box);
+    obstacleBoxes.push(box);
   }
 
   clock = new THREE.Clock();
@@ -338,9 +345,148 @@ function makeDynamicLabel(text, bg) {
   return { sprite, setText };
 }
 
+/* ------------------------------ MODE SELECT ------------------------------ */
+function showModeSelect() {
+  phase = 'MODE_SELECT';
+  crosshair.style.display = 'none';
+  resetNormalModeVisuals();
+  hud.textContent = '';
+  timerEl.textContent = '';
+  towersEl.textContent = '';
+  msgEl.textContent = '';
+  cooldownFill.style.width = '0%';
+  overlay.classList.remove('hidden');
+  overlay.innerHTML = `
+    <h1>모드 선택</h1>
+    <div style="display:flex; gap:20px; margin-top:10px;">
+      <div id="modeNormal" class="item-btn" style="width:160px; height:140px; flex-direction:column;">
+        <div style="font-size:20px; font-weight:bold;">일반</div>
+        <div style="font-size:12px; opacity:0.8; margin-top:8px;">넓은 오두막집<br>총(사격)과 칼(찌르기/던지기)만</div>
+      </div>
+      <div id="modeVariant" class="item-btn" style="width:160px; height:140px; flex-direction:column;">
+        <div style="font-size:20px; font-weight:bold;">변형</div>
+        <div style="font-size:12px; opacity:0.8; margin-top:8px;">아이템, 탑, 팀 교체<br>5분 매치</div>
+      </div>
+    </div>
+  `;
+  overlay.querySelector('#modeNormal').onclick = () => { gameMode = 'NORMAL'; startNormalMode(); };
+  overlay.querySelector('#modeVariant').onclick = () => { gameMode = 'VARIANT'; showLobby(); };
+}
+
+/* ------------------------------ NORMAL MODE (총과 칼만 있는 단순 난투) ------------------------------ */
+const NORMAL_BOUNDS = 33;
+const NORMAL_BOT_COUNT = 8;
+
+function buildCabin() {
+  if (cabinGroup) scene.remove(cabinGroup);
+  cabinGroup = new THREE.Group();
+  const wallMat = new THREE.MeshStandardMaterial({ color: 0x6b4423 });
+  const size = 70, wallH = 10, wallT = 1;
+  const walls = [
+    { w: size, h: wallH, d: wallT, pos: [0, wallH / 2, -size / 2] },
+    { w: size, h: wallH, d: wallT, pos: [0, wallH / 2, size / 2] },
+    { w: wallT, h: wallH, d: size, pos: [-size / 2, wallH / 2, 0] },
+    { w: wallT, h: wallH, d: size, pos: [size / 2, wallH / 2, 0] },
+  ];
+  walls.forEach(w => {
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(w.w, w.h, w.d), wallMat);
+    mesh.position.set(w.pos[0], w.pos[1], w.pos[2]);
+    cabinGroup.add(mesh);
+  });
+  // a few interior support beams for cover
+  const beamMat = new THREE.MeshStandardMaterial({ color: 0x5a3a1a });
+  for (let i = 0; i < 8; i++) {
+    const beam = new THREE.Mesh(new THREE.BoxGeometry(1.2, wallH, 1.2), beamMat);
+    const ang = (i / 8) * Math.PI * 2;
+    beam.position.set(Math.cos(ang) * 20, wallH / 2, Math.sin(ang) * 20);
+    cabinGroup.add(beam);
+  }
+  scene.add(cabinGroup);
+}
+
+let normalBots = [];
+function spawnNormalBot() {
+  const teamColor = 0xaa3333;
+  const mesh = new THREE.Group();
+  const bodyMat = new THREE.MeshStandardMaterial({ color: 0x552222 });
+  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.4, 1.0, 4, 8), bodyMat);
+  mesh.add(body);
+  const headMat = new THREE.MeshStandardMaterial({ color: teamColor, emissive: teamColor, emissiveIntensity: 0.25 });
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.3, 10, 10), headMat);
+  head.position.y = 0.95;
+  mesh.add(head);
+  const marker = new THREE.Sprite(new THREE.SpriteMaterial({ color: 0xff3333, depthTest: false }));
+  marker.scale.set(0.4, 0.4, 1);
+  marker.position.y = 1.75;
+  marker.renderOrder = 999;
+  mesh.add(marker);
+
+  const pos = new THREE.Vector3((Math.random() - 0.5) * 50, 1, (Math.random() - 0.5) * 50);
+  mesh.position.copy(pos);
+  scene.add(mesh);
+  const bot = { mesh, teamKey: 'enemy', alive: true, home: new THREE.Vector3(0, 1, 0) };
+  bots.push(bot);
+  normalBots.push(bot);
+  return bot;
+}
+
+function startNormalMode() {
+  overlay.classList.add('hidden');
+  crosshair.style.display = 'block';
+  phase = 'NORMAL_PLAYING';
+
+  for (const t of teams) if (t.towerGroup) scene.remove(t.towerGroup);
+  teams = [];
+  for (const b of bots) scene.remove(b.mesh);
+  bots = [];
+  normalBots = [];
+  for (const d of dyingBots) scene.remove(d.mesh);
+  dyingBots = [];
+  duelers = [];
+
+  floor.material.color.set(0xa0723c); // brown floor
+  for (const b of obstacleBoxes) b.visible = false;
+  buildCabin();
+
+  camera.position.set(0, 1.7, 0);
+  yaw = 0; pitch = 0;
+  weapon = null;
+  updateWeaponModels();
+  normalScore = 0;
+  msgLog = [];
+  logMsg('일반 모드 시작! 1번: 총(발사), 2번: 칼(찌르기/던지기), M: 모드 선택으로');
+
+  for (let i = 0; i < NORMAL_BOT_COUNT; i++) spawnNormalBot();
+  requestPointerLock();
+}
+
+function normalBotRespawn() {
+  setTimeout(() => {
+    if (phase === 'NORMAL_PLAYING') spawnNormalBot();
+  }, 3000);
+}
+
+function updateNormalHud() {
+  hud.innerHTML = `
+    모드: 일반<br>
+    처치 수: ${normalScore}<br>
+    무기: ${weapon === 'gun' ? '총 (좌클릭 발사)' : weapon === 'sword' ? '칼 (좌클릭 찌르기 / 우클릭 던지기)' : '맨손'}
+  `;
+}
+
+function resetNormalModeVisuals() {
+  floor.material.color.set(0x9a9a9e);
+  for (const b of obstacleBoxes) b.visible = true;
+  if (cabinGroup) { scene.remove(cabinGroup); cabinGroup = null; }
+  for (const b of normalBots) scene.remove(b.mesh);
+  normalBots = [];
+  bots = bots.filter(b => !b.mesh || b.teamKey !== 'enemy');
+}
+
 function showLobby() {
   phase = 'LOBBY';
   crosshair.style.display = 'none';
+  resetNormalModeVisuals();
   hud.textContent = '';
   timerEl.textContent = '';
   towersEl.textContent = '';
@@ -430,13 +576,16 @@ function startMatch() {
   activeKeys.forEach((key, i) => {
     const ang = (i / numTeams) * Math.PI * 2;
     const def = ITEM_DEFS[key];
+    const pos = new THREE.Vector3(Math.cos(ang) * radius, 0, Math.sin(ang) * radius);
     const team = {
       key, def, power: 100, floors: 1, alive: true,
       players: [], color: def.color,
-      pos: new THREE.Vector3(Math.cos(ang) * radius, 0, Math.sin(ang) * radius),
+      pos,
+      doorAngle: Math.atan2(-pos.z, -pos.x), // door faces the arena center, reachable from spawn
     };
     team.towerGroup = new THREE.Group();
     team.towerGroup.position.copy(team.pos);
+    team.towerGroup.lookAt(0, team.towerGroup.position.y, 0); // local -Z (the doorway gap) faces the arena center
     scene.add(team.towerGroup);
     buildTower(team);
     teams.push(team);
@@ -487,6 +636,17 @@ function buildTower(team) {
   lava.position.y = 0.03;
   team.towerGroup.add(lava);
   team.lavaMesh = lava;
+
+  // a doorway frame marking the entrance (local -Z, facing the arena center)
+  const frameMat = new THREE.MeshStandardMaterial({ color: 0x3a2a1a, metalness: 0.3, roughness: 0.7 });
+  [-1.6, 1.6].forEach(xOff => {
+    const post = new THREE.Mesh(new THREE.BoxGeometry(0.3, 3, 0.3), frameMat);
+    post.position.set(xOff, 1.5, -3.4);
+    team.towerGroup.add(post);
+  });
+  const lintel = new THREE.Mesh(new THREE.BoxGeometry(3.5, 0.3, 0.3), frameMat);
+  lintel.position.set(0, 3, -3.4);
+  team.towerGroup.add(lintel);
 
   // two caterpillar tread rails flanking the tower, height grows with floor count
   const towerHeight = team.floors * 2;
@@ -560,6 +720,7 @@ function spawnBot(team) {
 }
 
 function updateAllegianceMarkers() {
+  if (gameMode !== 'VARIANT') return; // Normal mode bots are always shown as enemies (red), fixed at spawn
   for (const bot of bots) {
     if (!bot.alive) continue;
     const isAlly = bot.teamKey === playerTeam.key;
@@ -585,10 +746,17 @@ function spawnPlayer(nearPos) {
 }
 
 /* ------------------------------ INPUT ------------------------------ */
+function isPlayingPhase() { return phase === 'PLAYING' || phase === 'NORMAL_PLAYING'; }
+
 window.addEventListener('keydown', (e) => {
   keys[e.code] = true;
   if (e.code.startsWith('Arrow')) e.preventDefault(); // stop page scroll
-  if (phase !== 'PLAYING') return;
+  if (e.code === 'KeyM' && (phase === 'NORMAL_PLAYING' || phase === 'LOBBY')) {
+    document.exitPointerLock && document.exitPointerLock();
+    showModeSelect();
+    return;
+  }
+  if (!isPlayingPhase()) return;
   if (e.code === 'Digit1') toggleWeapon('gun');
   if (e.code === 'Digit2') toggleWeapon('sword');
   if (e.code === 'Enter') useItem();
@@ -597,7 +765,7 @@ window.addEventListener('keydown', (e) => {
 window.addEventListener('keyup', (e) => { keys[e.code] = false; });
 
 document.addEventListener('click', () => {
-  if (phase === 'PLAYING' && !pointerLocked) requestPointerLock();
+  if (isPlayingPhase() && !pointerLocked) requestPointerLock();
 });
 function requestPointerLock() {
   renderer.domElement.requestPointerLock && renderer.domElement.requestPointerLock();
@@ -606,7 +774,7 @@ document.addEventListener('pointerlockchange', () => {
   pointerLocked = document.pointerLockElement === renderer.domElement;
 });
 document.addEventListener('mousemove', (e) => {
-  if (phase !== 'PLAYING' && phase !== 'LOBBY') return;
+  if (!isPlayingPhase() && phase !== 'LOBBY') return;
   if (pointerLocked) {
     yaw -= e.movementX * 0.0022;
     pitch -= e.movementY * 0.0022;
@@ -623,7 +791,7 @@ document.addEventListener('mousemove', (e) => {
 let dragLooking = false;
 let dragDistance = 0;
 document.addEventListener('mousedown', (e) => {
-  if ((phase === 'PLAYING' || phase === 'LOBBY') && !pointerLocked && e.button === 0) {
+  if ((isPlayingPhase() || phase === 'LOBBY') && !pointerLocked && e.button === 0) {
     dragLooking = true;
     dragDistance = 0;
   }
@@ -632,13 +800,13 @@ document.addEventListener('mouseup', (e) => {
   // Without pointer lock, the same left button both aims (drag) and fires, so only
   // treat it as a shot if the button was released without dragging the view first —
   // otherwise every shot fired at mousedown, before the player had aimed at all.
-  if (phase === 'PLAYING' && !pointerLocked && e.button === 0 && dragLooking && dragDistance < 6) {
+  if (isPlayingPhase() && !pointerLocked && e.button === 0 && dragLooking && dragDistance < 6) {
     fireWeaponPrimary();
   }
   dragLooking = false;
 });
 document.addEventListener('mousedown', (e) => {
-  if (phase !== 'PLAYING') return;
+  if (!isPlayingPhase()) return;
   if (pointerLocked && e.button === 0) fireWeaponPrimary();
   if (weapon === 'sword' && e.button === 2) swordThrow();
 });
@@ -646,7 +814,7 @@ function fireWeaponPrimary() {
   if (weapon === 'gun') fireGun();
   else if (weapon === 'sword') swordThrust();
 }
-document.addEventListener('contextmenu', (e) => { if (phase === 'PLAYING') e.preventDefault(); });
+document.addEventListener('contextmenu', (e) => { if (isPlayingPhase()) e.preventDefault(); });
 
 function toggleWeapon(w) {
   weapon = (weapon === w) ? null : w;
@@ -733,7 +901,7 @@ function findBotByHitObject(obj) {
 }
 
 function fireGun() {
-  if (!playerTeam.alive) return;
+  if (gameMode === 'VARIANT' && !playerTeam.alive) return;
   playWeaponKick();
   const ray = getForwardRay();
   ray.far = 200;
@@ -753,7 +921,7 @@ function fireGun() {
 }
 
 function swordThrust() {
-  if (!playerTeam.alive) return;
+  if (gameMode === 'VARIANT' && !playerTeam.alive) return;
   playWeaponKick();
   const ray = getForwardRay();
   ray.far = 2.5;
@@ -774,7 +942,7 @@ function swordThrust() {
   }
 }
 function swordThrow() {
-  if (!playerTeam.alive) return;
+  if (gameMode === 'VARIANT' && !playerTeam.alive) return;
   const ray = getForwardRay();
   ray.far = 40;
   const targets = bots.filter(b => b.alive).map(b => b.mesh);
@@ -792,13 +960,20 @@ function swordThrow() {
   updateWeaponModels();
 }
 function suicide() {
-  if (!playerTeam.alive) return;
+  if (gameMode !== 'VARIANT' || !playerTeam.alive) return;
   logMsg('스스로 목숨을 끊었습니다... 팀 전력이 급감합니다.');
   playerTeam.power = Math.max(0, playerTeam.power - 40);
   checkElimination(playerTeam);
 }
 
 function resolvePlayerHit(bot) {
+  if (gameMode === 'NORMAL') {
+    normalScore++;
+    removeBot(bot);
+    normalBotRespawn();
+    logMsg(`처치! (${normalScore})`);
+    return;
+  }
   const targetTeam = teams.find(t => t.key === bot.teamKey);
   if (!targetTeam || targetTeam.key === playerTeam.key) return;
   clashTeams(playerTeam, targetTeam, true);
@@ -866,28 +1041,92 @@ function spawnProjectile(fromPos, toPos, color, duration, size) {
   step();
 }
 
-// A brief vertical lightning bolt striking a tower
-function spawnLightningBolt(pos) {
-  const points = [];
-  let x = 0, y = 10;
-  while (y > 0) {
-    points.push(new THREE.Vector3(pos.x + x, y, pos.z));
-    y -= 1.5;
-    x += (Math.random() - 0.5) * 1.2;
+// "전기 기운이 맴돌아" - a ring of electric sparks swirling around a tower
+function spawnElectricSwirl(pos) {
+  const group = new THREE.Group();
+  group.position.set(pos.x, 3, pos.z);
+  const sparkCount = 6;
+  const sparks = [];
+  for (let i = 0; i < sparkCount; i++) {
+    const spark = new THREE.Mesh(
+      new THREE.SphereGeometry(0.25, 6, 6),
+      new THREE.MeshBasicMaterial({ color: 0xfff066 })
+    );
+    group.add(spark);
+    sparks.push(spark);
   }
-  points.push(new THREE.Vector3(pos.x, 0, pos.z));
-  const geo = new THREE.BufferGeometry().setFromPoints(points);
-  const mat = new THREE.LineBasicMaterial({ color: 0xfff066, transparent: true, opacity: 1 });
-  const bolt = new THREE.Line(geo, mat);
-  scene.add(bolt);
+  scene.add(group);
   let t = 0;
-  const fade = () => {
-    t += 0.05;
-    mat.opacity = Math.max(0, 1 - t * 3);
-    if (t < 0.35) requestAnimationFrame(fade);
-    else { scene.remove(bolt); geo.dispose(); mat.dispose(); }
+  const duration = 1.2;
+  const spin = () => {
+    t += 0.04;
+    sparks.forEach((s, i) => {
+      const a = (i / sparkCount) * Math.PI * 2 + t * 8;
+      s.position.set(Math.cos(a) * 3.4, Math.sin(t * 5 + i) * 0.6, Math.sin(a) * 3.4);
+    });
+    if (t < duration) requestAnimationFrame(spin);
+    else scene.remove(group);
   };
-  fade();
+  spin();
+}
+
+// "돌 두개가 굴러가" - rocks rolling along the ground instead of flying through the air
+function spawnRollingRock(fromPos, toPos) {
+  const mesh = new THREE.Mesh(
+    new THREE.DodecahedronGeometry(0.55, 0),
+    new THREE.MeshStandardMaterial({ color: 0x8a7a68 })
+  );
+  const from = fromPos.clone(); from.y = 0.5;
+  const to = toPos.clone(); to.y = 0.5;
+  mesh.position.copy(from);
+  scene.add(mesh);
+  const axis = new THREE.Vector3(to.z - from.z, 0, from.x - to.x).normalize();
+  let t = 0;
+  const duration = 1.1;
+  const roll = () => {
+    t += 0.045;
+    const k = Math.min(1, t / duration);
+    mesh.position.lerpVectors(from, to, k);
+    mesh.rotateOnWorldAxis(axis, 0.5);
+    if (k < 1) requestAnimationFrame(roll);
+    else { scene.remove(mesh); spawnClashFlash(toPos, toPos); }
+  };
+  roll();
+}
+
+// "벌레들이 튀어나와 그 팀을 공격해" - a small swarm scattering toward the target
+function spawnBugSwarm(fromPos, toPos) {
+  const bugCount = 7;
+  for (let i = 0; i < bugCount; i++) {
+    const bug = new THREE.Mesh(
+      new THREE.SphereGeometry(0.18, 6, 6),
+      new THREE.MeshStandardMaterial({ color: 0x77aa33, emissive: 0x445511, emissiveIntensity: 0.5 })
+    );
+    const from = fromPos.clone();
+    from.x += (Math.random() - 0.5) * 1.5;
+    from.z += (Math.random() - 0.5) * 1.5;
+    from.y = 0.6;
+    const to = toPos.clone();
+    to.x += (Math.random() - 0.5) * 2.5;
+    to.z += (Math.random() - 0.5) * 2.5;
+    to.y = 0.6;
+    bug.position.copy(from);
+    scene.add(bug);
+    let t = 0;
+    const duration = 0.6 + Math.random() * 0.4;
+    const jitterSeed = Math.random() * 10;
+    const flit = () => {
+      t += 0.045;
+      const k = Math.min(1, t / duration);
+      bug.position.lerpVectors(from, to, k);
+      bug.position.x += Math.sin(t * 20 + jitterSeed) * 0.15;
+      bug.position.y += Math.abs(Math.sin(t * 25 + jitterSeed)) * 0.3;
+      if (k < 1) requestAnimationFrame(flit);
+      else scene.remove(bug);
+    };
+    flit();
+  }
+  spawnClashFlash(toPos, toPos);
 }
 
 function spawnClashFlash(posA, posB) {
@@ -961,7 +1200,7 @@ function checkElimination(team) {
 
 /* ------------------------------ ITEM USE ------------------------------ */
 function useItem() {
-  if (itemCooldownLeft > 0 || !playerTeam.alive) return;
+  if (gameMode !== 'VARIANT' || itemCooldownLeft > 0 || !playerTeam.alive) return;
   itemCooldownLeft = ITEM_COOLDOWN;
   SFX.itemUse();
   const key = playerTeam.key;
@@ -981,7 +1220,7 @@ function useItem() {
     case 'electric': {
       others.forEach(t => {
         t.power = Math.max(0, t.power * 0.8);
-        spawnLightningBolt(t.pos);
+        spawnElectricSwirl(t.pos);
         checkElimination(t);
       });
       logMsg(`${playerTeam.def.name} 팀이 감전 능력을 사용해 모든 팀의 힘을 20% 감소시켰습니다!`);
@@ -1009,7 +1248,7 @@ function useItem() {
         const t = others[Math.floor(Math.random() * others.length)];
         if (t) {
           t.power = Math.max(0, t.power * 0.9);
-          spawnProjectile(playerTeam.pos, t.pos, 0x8a7a68, 0.6, 0.7);
+          spawnRollingRock(playerTeam.pos, t.pos);
           checkElimination(t);
         }
       }
@@ -1040,7 +1279,7 @@ function useItem() {
       const t = others[Math.floor(Math.random() * others.length)];
       if (t) {
         t.power = Math.max(0, t.power * 0.85);
-        spawnProjectile(playerTeam.pos, t.pos, 0x77aa33, 0.7, 0.4);
+        spawnBugSwarm(playerTeam.pos, t.pos);
         checkElimination(t);
       }
       logMsg(`${playerTeam.def.name} 팀이 벌레떼를 보내 ${t ? t.def.name : ''} 팀의 힘을 15% 감소시켰습니다!`);
@@ -1062,11 +1301,12 @@ function updateBots(dt) {
     if (bot.wanderTimer <= 0) {
       bot.wanderTimer = 2 + Math.random() * 3;
       const team = teams.find(t => t.key === bot.teamKey);
-      const home = team ? team.pos : bot.mesh.position;
+      const home = bot.home || (team ? team.pos : bot.mesh.position);
+      const spread = gameMode === 'NORMAL' ? 30 : 12;
       bot.wanderTarget = new THREE.Vector3(
-        home.x + (Math.random() - 0.5) * 12,
+        home.x + (Math.random() - 0.5) * spread,
         1,
-        home.z + (Math.random() - 0.5) * 12
+        home.z + (Math.random() - 0.5) * spread
       );
     }
     const to = new THREE.Vector3().subVectors(bot.wanderTarget, bot.mesh.position);
@@ -1160,24 +1400,40 @@ function updatePlayer(dt) {
   camera.position.y = 1.7;
 
   // simple bounds
-  camera.position.x = Math.max(-95, Math.min(95, camera.position.x));
-  camera.position.z = Math.max(-95, Math.min(95, camera.position.z));
+  const bound = phase === 'NORMAL_PLAYING' ? NORMAL_BOUNDS : 95;
+  camera.position.x = Math.max(-bound, Math.min(bound, camera.position.x));
+  camera.position.z = Math.max(-bound, Math.min(bound, camera.position.z));
 
-  // can't walk into a team's factory tower (treads + lava pit footprint)
+  // Team factory towers: solid on the outside, but each has a doorway (facing the
+  // arena center) you can walk through, and walking toward the middle climbs the
+  // stairs up to the top floor.
+  playerClimb = 0;
   if (phase === 'PLAYING') {
     const TOWER_COLLISION_RADIUS = 3.6;
+    const DOOR_HALF_WIDTH = 0.45; // radians (~26 degrees)
     for (const team of teams) {
       if (!team.towerGroup || !team.towerGroup.visible) continue;
       const dx = camera.position.x - team.pos.x;
       const dz = camera.position.z - team.pos.z;
       const dist = Math.sqrt(dx * dx + dz * dz);
-      if (dist < TOWER_COLLISION_RADIUS && dist > 0.0001) {
+      if (dist >= TOWER_COLLISION_RADIUS || dist <= 0.0001) continue;
+
+      const angle = Math.atan2(dz, dx);
+      const doorWorldAngle = Math.atan2(Math.sin(team.doorAngle), Math.cos(team.doorAngle));
+      let angDiff = angle - doorWorldAngle;
+      angDiff = Math.atan2(Math.sin(angDiff), Math.cos(angDiff)); // wrap to [-pi, pi]
+
+      if (Math.abs(angDiff) < DOOR_HALF_WIDTH) {
+        // inside the doorway: walking toward the tower's center climbs the stairs
+        playerClimb = Math.max(playerClimb, 1 - dist / TOWER_COLLISION_RADIUS);
+      } else {
         const push = TOWER_COLLISION_RADIUS / dist;
         camera.position.x = team.pos.x + dx * push;
         camera.position.z = team.pos.z + dz * push;
       }
     }
   }
+  camera.position.y = 1.7 + playerClimb * 10; // climb toward the top floor near the tower's core
 }
 
 /* ------------------------------ HUD ------------------------------ */
@@ -1254,6 +1510,14 @@ function animate() {
     }
   }
 
+  if (phase === 'NORMAL_PLAYING') {
+    updatePlayer(dt);
+    updateBots(dt);
+    updateDyingBots(dt);
+    updateWeaponKick(dt);
+    updateNormalHud();
+  }
+
   renderer.render(scene, camera);
 }
 
@@ -1265,4 +1529,4 @@ startMatch = function () {
 };
 
 initThree();
-showLobby();
+showModeSelect();
