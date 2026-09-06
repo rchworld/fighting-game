@@ -613,23 +613,39 @@ document.addEventListener('mousemove', (e) => {
     pitch = Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05, pitch));
   } else if (dragLooking) {
     // fallback look control for environments where pointer lock is unavailable
-    // (e.g. the page opened directly as a file:// URL instead of via a server)
+    // (e.g. the page opened directly as a file:// URL, or inside a sandboxed iframe)
     yaw -= e.movementX * 0.0022;
     pitch -= e.movementY * 0.0022;
     pitch = Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05, pitch));
+    dragDistance += Math.abs(e.movementX) + Math.abs(e.movementY);
   }
 });
 let dragLooking = false;
+let dragDistance = 0;
 document.addEventListener('mousedown', (e) => {
-  if ((phase === 'PLAYING' || phase === 'LOBBY') && !pointerLocked && e.button === 0) dragLooking = true;
+  if ((phase === 'PLAYING' || phase === 'LOBBY') && !pointerLocked && e.button === 0) {
+    dragLooking = true;
+    dragDistance = 0;
+  }
 });
-document.addEventListener('mouseup', () => { dragLooking = false; });
+document.addEventListener('mouseup', (e) => {
+  // Without pointer lock, the same left button both aims (drag) and fires, so only
+  // treat it as a shot if the button was released without dragging the view first —
+  // otherwise every shot fired at mousedown, before the player had aimed at all.
+  if (phase === 'PLAYING' && !pointerLocked && e.button === 0 && dragLooking && dragDistance < 6) {
+    fireWeaponPrimary();
+  }
+  dragLooking = false;
+});
 document.addEventListener('mousedown', (e) => {
   if (phase !== 'PLAYING') return;
-  if (weapon === 'gun' && e.button === 0) fireGun();
-  if (weapon === 'sword' && e.button === 0) swordThrust();
+  if (pointerLocked && e.button === 0) fireWeaponPrimary();
   if (weapon === 'sword' && e.button === 2) swordThrow();
 });
+function fireWeaponPrimary() {
+  if (weapon === 'gun') fireGun();
+  else if (weapon === 'sword') swordThrust();
+}
 document.addEventListener('contextmenu', (e) => { if (phase === 'PLAYING') e.preventDefault(); });
 
 function toggleWeapon(w) {
@@ -1146,6 +1162,22 @@ function updatePlayer(dt) {
   // simple bounds
   camera.position.x = Math.max(-95, Math.min(95, camera.position.x));
   camera.position.z = Math.max(-95, Math.min(95, camera.position.z));
+
+  // can't walk into a team's factory tower (treads + lava pit footprint)
+  if (phase === 'PLAYING') {
+    const TOWER_COLLISION_RADIUS = 3.6;
+    for (const team of teams) {
+      if (!team.towerGroup || !team.towerGroup.visible) continue;
+      const dx = camera.position.x - team.pos.x;
+      const dz = camera.position.z - team.pos.z;
+      const dist = Math.sqrt(dx * dx + dz * dz);
+      if (dist < TOWER_COLLISION_RADIUS && dist > 0.0001) {
+        const push = TOWER_COLLISION_RADIUS / dist;
+        camera.position.x = team.pos.x + dx * push;
+        camera.position.z = team.pos.z + dz * push;
+      }
+    }
+  }
 }
 
 /* ------------------------------ HUD ------------------------------ */
