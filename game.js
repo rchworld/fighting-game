@@ -407,6 +407,9 @@ function buildCabin() {
 }
 
 let normalBots = [];
+let playerHP = 100;
+const PLAYER_MAX_HP = 100;
+
 function spawnNormalBot() {
   const teamColor = 0xaa3333;
   const mesh = new THREE.Group();
@@ -423,12 +426,18 @@ function spawnNormalBot() {
   marker.renderOrder = 999;
   mesh.add(marker);
 
-  const pos = new THREE.Vector3((Math.random() - 0.5) * 50, 1, (Math.random() - 0.5) * 50);
+  // spawn somewhere visibly around the player, not lost in a far corner of the cabin
+  const ang = Math.random() * Math.PI * 2;
+  const dist = 12 + Math.random() * 15;
+  const pos = new THREE.Vector3(camera.position.x + Math.cos(ang) * dist, 1, camera.position.z + Math.sin(ang) * dist);
+  pos.x = Math.max(-32, Math.min(32, pos.x));
+  pos.z = Math.max(-32, Math.min(32, pos.z));
   mesh.position.copy(pos);
   scene.add(mesh);
-  const bot = { mesh, teamKey: 'enemy', alive: true, home: new THREE.Vector3(0, 1, 0) };
+  const bot = { mesh, teamKey: 'enemy', alive: true, home: new THREE.Vector3(0, 1, 0), attackCooldown: 0 };
   bots.push(bot);
   normalBots.push(bot);
+  spawnClashFlash(pos, pos); // visible puff so a respawn is obvious, not just "a bot appeared somewhere"
   return bot;
 }
 
@@ -455,6 +464,7 @@ function startNormalMode() {
   weapon = null;
   updateWeaponModels();
   normalScore = 0;
+  playerHP = PLAYER_MAX_HP;
   msgLog = [];
   logMsg('일반 모드 시작! 1번: 총(발사), 2번: 칼(찌르기/던지기), M: 모드 선택으로');
 
@@ -464,16 +474,95 @@ function startNormalMode() {
 
 function normalBotRespawn() {
   setTimeout(() => {
-    if (phase === 'NORMAL_PLAYING') spawnNormalBot();
-  }, 3000);
+    if (phase === 'NORMAL_PLAYING') {
+      spawnNormalBot();
+      logMsg('적이 새로 나타났습니다.');
+    }
+  }, 2500);
 }
 
 function updateNormalHud() {
   hud.innerHTML = `
     모드: 일반<br>
+    체력: ${Math.max(0, Math.round(playerHP))} / ${PLAYER_MAX_HP}<br>
     처치 수: ${normalScore}<br>
-    무기: ${weapon === 'gun' ? '총 (좌클릭 발사)' : weapon === 'sword' ? '칼 (좌클릭 찌르기 / 우클릭 던지기)' : '맨손'}
+    무기: ${weapon === 'gun' ? '총 (좌클릭 발사)' : weapon === 'sword' ? '칼 (좌클릭 찌르기 / 우클릭 던지기) - 닿기만 해도 처치!' : '맨손'}
   `;
+}
+
+// Enemies actively chase the player when close enough, instead of only wandering,
+// and deal contact damage; while the sword is equipped, touching an enemy shatters
+// them instantly (no need to swing).
+const NORMAL_AGGRO_RANGE = 18;
+const NORMAL_ATTACK_RANGE = 1.6;
+function updateNormalCombat(dt) {
+  for (const bot of normalBots) {
+    if (!bot.alive) continue;
+    const toPlayer = new THREE.Vector3().subVectors(camera.position, bot.mesh.position);
+    toPlayer.y = 0;
+    const dist = toPlayer.length();
+
+    if (weapon === 'sword' && dist < NORMAL_ATTACK_RANGE + 0.2) {
+      shatterBot(bot);
+      continue;
+    }
+
+    if (dist < NORMAL_AGGRO_RANGE) {
+      bot.duel = true; // reuse the "don't wander" flag while chasing
+      if (dist > NORMAL_ATTACK_RANGE) {
+        toPlayer.normalize().multiplyScalar(dt * 2.6);
+        bot.mesh.position.add(toPlayer);
+      } else {
+        bot.attackCooldown -= dt;
+        if (bot.attackCooldown <= 0) {
+          bot.attackCooldown = 1;
+          playerHP = Math.max(0, playerHP - 8);
+          SFX.swordHit();
+          if (playerHP <= 0) respawnPlayerNormal();
+        }
+      }
+    } else {
+      bot.duel = false;
+    }
+  }
+}
+
+function respawnPlayerNormal() {
+  playerHP = PLAYER_MAX_HP;
+  camera.position.set(0, 1.7, 0);
+  logMsg('쓰러졌다가 다시 일어났습니다!');
+}
+
+// "산산조각" - shatters into small flying debris pieces, distinct from the
+// stun-then-die sword-swing kill
+function shatterBot(bot) {
+  if (!bot.alive) return;
+  const pos = bot.mesh.position.clone();
+  bot.alive = false;
+  bot.duel = false;
+  scene.remove(bot.mesh);
+  SFX.swordHit();
+  const shardMat = new THREE.MeshStandardMaterial({ color: 0x552222 });
+  for (let i = 0; i < 8; i++) {
+    const shard = new THREE.Mesh(new THREE.BoxGeometry(0.25, 0.25, 0.25), shardMat);
+    shard.position.copy(pos);
+    shard.position.y = 1;
+    scene.add(shard);
+    const vel = new THREE.Vector3((Math.random() - 0.5) * 5, Math.random() * 4 + 1, (Math.random() - 0.5) * 5);
+    let t = 0;
+    const fly = () => {
+      t += 0.03;
+      shard.position.addScaledVector(vel, 0.03);
+      vel.y -= 0.25; // gravity
+      shard.rotation.x += 0.3; shard.rotation.y += 0.2;
+      if (t < 0.8) requestAnimationFrame(fly);
+      else scene.remove(shard);
+    };
+    fly();
+  }
+  normalScore++;
+  logMsg(`산산조각! (${normalScore})`);
+  normalBotRespawn();
 }
 
 function resetNormalModeVisuals() {
@@ -1568,6 +1657,7 @@ function animate() {
 
   if (phase === 'NORMAL_PLAYING') {
     updatePlayer(dt);
+    updateNormalCombat(dt);
     updateBots(dt);
     updateDyingBots(dt);
     updateWeaponKick(dt);
