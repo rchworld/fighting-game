@@ -61,6 +61,8 @@ let keys = {};
 let yaw = 0, pitch = 0;
 let pointerLocked = false;
 let playerClimb = 0; // 0..1, how far up a tower's stairway the player currently is
+const TOWER_COLLISION_RADIUS = 8; // spacious interior
+const DOOR_HALF_WIDTH = 1.05; // radians (~60 degrees each side = a wide, easy-to-hit doorway)
 let weapon = null;       // null | 'gun' | 'sword'
 let itemCooldownLeft = 0;
 let matchTimeLeft = MATCH_SECONDS;
@@ -627,41 +629,51 @@ function buildTower(team) {
   const darkMat = new THREE.MeshStandardMaterial({ color: 0x2a2a2e, metalness: 0.4, roughness: 0.6 });
   const treadMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1c, metalness: 0.5, roughness: 0.5 });
 
-  // a lava pit glowing at the base of the factory, where the caterpillar treads drop boxes in
+  // a wide floor plate for the spacious interior, with a glowing lava pit near the core
+  const floorPlate = new THREE.Mesh(
+    new THREE.CircleGeometry(TOWER_COLLISION_RADIUS - 0.3, 32),
+    new THREE.MeshStandardMaterial({ color: 0x3a3a3e })
+  );
+  floorPlate.rotation.x = -Math.PI / 2;
+  floorPlate.position.y = 0.02;
+  team.towerGroup.add(floorPlate);
+
   const lava = new THREE.Mesh(
-    new THREE.CircleGeometry(3.2, 24),
+    new THREE.CircleGeometry(4, 24),
     new THREE.MeshStandardMaterial({ color: 0xff5522, emissive: 0xff3300, emissiveIntensity: 1.2 })
   );
   lava.rotation.x = -Math.PI / 2;
-  lava.position.y = 0.03;
+  lava.position.y = 0.04;
   team.towerGroup.add(lava);
   team.lavaMesh = lava;
 
-  // a doorway frame marking the entrance (local -Z, facing the arena center)
+  // a wide doorway frame marking the spacious entrance (local -Z, facing the arena center)
+  const doorHalfW = Math.sin(DOOR_HALF_WIDTH) * TOWER_COLLISION_RADIUS;
   const frameMat = new THREE.MeshStandardMaterial({ color: 0x3a2a1a, metalness: 0.3, roughness: 0.7 });
-  [-1.6, 1.6].forEach(xOff => {
-    const post = new THREE.Mesh(new THREE.BoxGeometry(0.3, 3, 0.3), frameMat);
-    post.position.set(xOff, 1.5, -3.4);
+  [-doorHalfW, doorHalfW].forEach(xOff => {
+    const post = new THREE.Mesh(new THREE.BoxGeometry(0.4, 4, 0.4), frameMat);
+    post.position.set(xOff, 2, -TOWER_COLLISION_RADIUS);
     team.towerGroup.add(post);
   });
-  const lintel = new THREE.Mesh(new THREE.BoxGeometry(3.5, 0.3, 0.3), frameMat);
-  lintel.position.set(0, 3, -3.4);
+  const lintel = new THREE.Mesh(new THREE.BoxGeometry(doorHalfW * 2 + 0.4, 0.4, 0.4), frameMat);
+  lintel.position.set(0, 4, -TOWER_COLLISION_RADIUS);
   team.towerGroup.add(lintel);
 
-  // two caterpillar tread rails flanking the tower, height grows with floor count
+  // caterpillar tread rails ringing the spacious interior's outer wall, height grows with floor count
   const towerHeight = team.floors * 2;
-  [-2.6, 2.6].forEach(xOff => {
+  const treadRing = 12;
+  for (let i = 0; i < treadRing; i++) {
+    const a = (i / treadRing) * Math.PI * 2;
+    // leave a gap in the wall ring where the doorway is (local -Z, angle = PI)
+    const angFromDoor = Math.atan2(Math.sin(a - Math.PI), Math.cos(a - Math.PI));
+    if (Math.abs(angFromDoor) < DOOR_HALF_WIDTH + 0.15) continue;
+    const tx = Math.cos(a) * TOWER_COLLISION_RADIUS;
+    const tz = Math.sin(a) * TOWER_COLLISION_RADIUS;
     const tread = new THREE.Mesh(new THREE.BoxGeometry(0.7, towerHeight, 1.4), treadMat);
-    tread.position.set(xOff, towerHeight / 2, 0);
+    tread.position.set(tx, towerHeight / 2, tz);
+    tread.lookAt(0, towerHeight / 2, 0);
     team.towerGroup.add(tread);
-    // tread segments (the "caterpillar" cross-bars)
-    const segCount = Math.max(2, Math.floor(towerHeight / 0.8));
-    for (let s = 0; s < segCount; s++) {
-      const bar = new THREE.Mesh(new THREE.BoxGeometry(0.75, 0.15, 1.5), darkMat);
-      bar.position.set(xOff, s * (towerHeight / segCount) + 0.2, 0);
-      team.towerGroup.add(bar);
-    }
-  });
+  }
 
   // factory floors, each with a small staircase up to the next floor
   for (let f = 0; f < team.floors; f++) {
@@ -1129,6 +1141,51 @@ function spawnBugSwarm(fromPos, toPos) {
   spawnClashFlash(toPos, toPos);
 }
 
+// A rising, expanding burst of light at the caster's own tower the instant an
+// item is activated, so "the effect being generated" is clearly visible before
+// it travels anywhere.
+function spawnCastBurst(pos, color) {
+  const ringCount = 3;
+  for (let i = 0; i < ringCount; i++) {
+    const ring = new THREE.Mesh(
+      new THREE.TorusGeometry(0.6, 0.12, 8, 20),
+      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.9 })
+    );
+    ring.rotation.x = Math.PI / 2;
+    ring.position.set(pos.x, 0.5, pos.z);
+    scene.add(ring);
+    let t = 0;
+    const delay = i * 0.12;
+    const rise = () => {
+      t += 0.045;
+      const k = t - delay;
+      if (k < 0) { requestAnimationFrame(rise); return; }
+      ring.position.y = 0.5 + k * 4;
+      ring.scale.setScalar(1 + k * 2.5);
+      ring.material.opacity = Math.max(0, 0.9 - k * 1.1);
+      if (k < 0.9) requestAnimationFrame(rise);
+      else scene.remove(ring);
+    };
+    rise();
+  }
+  // a quick bright flash at ground level marking the moment of activation
+  const flash = new THREE.Mesh(
+    new THREE.SphereGeometry(1.2, 12, 12),
+    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 1 })
+  );
+  flash.position.set(pos.x, 1, pos.z);
+  scene.add(flash);
+  let ft = 0;
+  const fade = () => {
+    ft += 0.05;
+    flash.scale.setScalar(1 + ft * 3);
+    flash.material.opacity = Math.max(0, 1 - ft * 2.5);
+    if (ft < 0.4) requestAnimationFrame(fade);
+    else scene.remove(flash);
+  };
+  fade();
+}
+
 function spawnClashFlash(posA, posB) {
   const mid = new THREE.Vector3().addVectors(posA, posB).multiplyScalar(0.5);
   const flash = new THREE.Mesh(
@@ -1203,6 +1260,7 @@ function useItem() {
   if (gameMode !== 'VARIANT' || itemCooldownLeft > 0 || !playerTeam.alive) return;
   itemCooldownLeft = ITEM_COOLDOWN;
   SFX.itemUse();
+  spawnCastBurst(playerTeam.pos, playerTeam.color);
   const key = playerTeam.key;
   const others = teams.filter(t => t.alive && t.key !== key);
   switch (key) {
@@ -1409,8 +1467,6 @@ function updatePlayer(dt) {
   // stairs up to the top floor.
   playerClimb = 0;
   if (phase === 'PLAYING') {
-    const TOWER_COLLISION_RADIUS = 3.6;
-    const DOOR_HALF_WIDTH = 0.45; // radians (~26 degrees)
     for (const team of teams) {
       if (!team.towerGroup || !team.towerGroup.visible) continue;
       const dx = camera.position.x - team.pos.x;
@@ -1424,7 +1480,7 @@ function updatePlayer(dt) {
       angDiff = Math.atan2(Math.sin(angDiff), Math.cos(angDiff)); // wrap to [-pi, pi]
 
       if (Math.abs(angDiff) < DOOR_HALF_WIDTH) {
-        // inside the doorway: walking toward the tower's center climbs the stairs
+        // inside the wide doorway: walking toward the tower's spacious core climbs the stairs
         playerClimb = Math.max(playerClimb, 1 - dist / TOWER_COLLISION_RADIUS);
       } else {
         const push = TOWER_COLLISION_RADIUS / dist;
@@ -1433,7 +1489,7 @@ function updatePlayer(dt) {
       }
     }
   }
-  camera.position.y = 1.7 + playerClimb * 10; // climb toward the top floor near the tower's core
+  camera.position.y = 1.7 + playerClimb * 12; // climb toward the top floor near the tower's core
 }
 
 /* ------------------------------ HUD ------------------------------ */
