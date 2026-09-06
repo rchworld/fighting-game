@@ -137,6 +137,7 @@ function initThree() {
 
   camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 500);
   camera.position.set(0, 1.7, 8);
+  scene.add(camera); // so weapon models parented to the camera render
 
   renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setSize(window.innerWidth, window.innerHeight);
@@ -170,6 +171,7 @@ function initThree() {
 
   clock = new THREE.Clock();
   initEffectMeshes();
+  initWeaponModels();
   window.addEventListener('resize', onResize);
   animate();
 }
@@ -350,6 +352,7 @@ function startMatch() {
   matchRunning = true;
   itemCooldownLeft = 0;
   weapon = null;
+  updateWeaponModels();
   tornado.active = false;
   fireZone.active = false;
   snowTimeLeft = 0;
@@ -433,6 +436,40 @@ document.addEventListener('contextmenu', (e) => { if (phase === 'PLAYING') e.pre
 
 function toggleWeapon(w) {
   weapon = (weapon === w) ? null : w;
+  updateWeaponModels();
+}
+
+let gunModel = null, swordModel = null;
+function initWeaponModels() {
+  gunModel = new THREE.Group();
+  const gunBody = new THREE.Mesh(
+    new THREE.BoxGeometry(0.08, 0.08, 0.35),
+    new THREE.MeshStandardMaterial({ color: 0x555555 })
+  );
+  gunModel.add(gunBody);
+  gunModel.position.set(0.22, -0.2, -0.4);
+  gunModel.visible = false;
+  camera.add(gunModel);
+
+  swordModel = new THREE.Group();
+  const blade = new THREE.Mesh(
+    new THREE.BoxGeometry(0.04, 0.04, 0.5),
+    new THREE.MeshStandardMaterial({ color: 0xcccccc, metalness: 0.7 })
+  );
+  blade.position.z = -0.2;
+  const hilt = new THREE.Mesh(
+    new THREE.BoxGeometry(0.06, 0.06, 0.1),
+    new THREE.MeshStandardMaterial({ color: 0x442211 })
+  );
+  hilt.position.z = 0.1;
+  swordModel.add(blade, hilt);
+  swordModel.position.set(0.22, -0.2, -0.4);
+  swordModel.visible = false;
+  camera.add(swordModel);
+}
+function updateWeaponModels() {
+  if (gunModel) gunModel.visible = weapon === 'gun';
+  if (swordModel) swordModel.visible = weapon === 'sword';
 }
 
 /* ------------------------------ COMBAT ------------------------------ */
@@ -517,6 +554,7 @@ function swordThrow() {
     logMsg('칼을 던졌지만 빗나갔습니다.');
   }
   weapon = null; // knife thrown away
+  updateWeaponModels();
 }
 function suicide() {
   if (!playerTeam.alive) return;
