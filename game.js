@@ -471,6 +471,14 @@ function updateWeaponModels() {
   if (gunModel) gunModel.visible = weapon === 'gun';
   if (swordModel) swordModel.visible = weapon === 'sword';
 }
+let weaponKick = 0; // 0..1, decays each frame
+function playWeaponKick() { weaponKick = 1; }
+function updateWeaponKick(dt) {
+  if (weaponKick <= 0) return;
+  weaponKick = Math.max(0, weaponKick - dt * 6);
+  const model = weapon === 'gun' ? gunModel : weapon === 'sword' ? swordModel : null;
+  if (model) model.position.z = -0.4 + weaponKick * 0.15;
+}
 
 /* ------------------------------ COMBAT ------------------------------ */
 function getForwardRay() {
@@ -500,6 +508,7 @@ function spawnStuckKnife(point, dir) {
 
 function fireGun() {
   if (!playerTeam.alive) return;
+  playWeaponKick();
   const ray = getForwardRay();
   ray.far = 200;
   const targets = bots.filter(b => b.alive).map(b => b.mesh);
@@ -520,6 +529,7 @@ function fireGun() {
 
 function swordThrust() {
   if (!playerTeam.alive) return;
+  playWeaponKick();
   const ray = getForwardRay();
   ray.far = 2.5;
   const targets = bots.filter(b => b.alive).map(b => b.mesh);
@@ -913,6 +923,7 @@ function animate() {
     updateEffectMeshes(dt);
     updateDyingBots(dt);
     updateDuelers(dt);
+    updateWeaponKick(dt);
     updateHud();
 
     matchTimeLeft -= dt;
