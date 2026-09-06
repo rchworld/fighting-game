@@ -408,16 +408,38 @@ function getForwardRay() {
   return new THREE.Raycaster(camera.position, dir, 0.1, 200);
 }
 
+function spawnTracer(start, end, color) {
+  const geo = new THREE.BufferGeometry().setFromPoints([start, end]);
+  const mat = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.9 });
+  const line = new THREE.Line(geo, mat);
+  scene.add(line);
+  setTimeout(() => { scene.remove(line); geo.dispose(); mat.dispose(); }, 120);
+}
+
+function spawnStuckKnife(point, dir) {
+  const knife = new THREE.Mesh(
+    new THREE.ConeGeometry(0.06, 0.5, 6),
+    new THREE.MeshStandardMaterial({ color: 0xcccccc, metalness: 0.6 })
+  );
+  knife.position.copy(point);
+  knife.lookAt(point.clone().add(dir));
+  knife.rotateX(Math.PI / 2);
+  scene.add(knife);
+}
+
 function fireGun() {
   const ray = getForwardRay();
   ray.far = 200;
   const targets = bots.filter(b => b.alive).map(b => b.mesh);
   const hits = ray.intersectObjects(targets, false);
+  const dir = ray.ray.direction.clone();
   if (hits.length > 0) {
+    spawnTracer(camera.position, hits[0].point, 0xffee88);
     const mesh = hits[0].object;
     const bot = bots.find(b => b.mesh === mesh);
     if (bot) resolvePlayerHit(bot);
   } else {
+    spawnTracer(camera.position, camera.position.clone().add(dir.multiplyScalar(200)), 0xffee88);
     logMsg('총알이 빗나갔습니다.');
   }
 }
@@ -432,6 +454,7 @@ function swordThrust() {
     const bot = bots.find(b => b.mesh === hits[0].object);
     if (bot) resolvePlayerHit(bot);
   } else if (objHits.length > 0) {
+    spawnStuckKnife(objHits[0].point, ray.ray.direction);
     logMsg('칼이 물체에 꽂혔습니다.');
   } else {
     logMsg('허공을 찔렀습니다.');
