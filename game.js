@@ -426,6 +426,25 @@ function spawnNormalBot() {
   marker.renderOrder = 999;
   mesh.add(marker);
 
+  // half the enemies carry a gun (keep their distance, shoot) and half a sword
+  // (charge into melee) - a visible weapon model marks which
+  const weaponType = Math.random() < 0.5 ? 'gun' : 'sword';
+  let weaponMesh;
+  if (weaponType === 'gun') {
+    weaponMesh = new THREE.Mesh(
+      new THREE.BoxGeometry(0.1, 0.1, 0.5),
+      new THREE.MeshStandardMaterial({ color: 0x333333 })
+    );
+    weaponMesh.position.set(0.35, 0.5, 0.2);
+  } else {
+    weaponMesh = new THREE.Mesh(
+      new THREE.BoxGeometry(0.05, 0.05, 0.6),
+      new THREE.MeshStandardMaterial({ color: 0xcccccc, metalness: 0.6 })
+    );
+    weaponMesh.position.set(0.35, 0.5, 0.2);
+  }
+  mesh.add(weaponMesh);
+
   // spawn somewhere visibly around the player, not lost in a far corner of the cabin
   const ang = Math.random() * Math.PI * 2;
   const dist = 12 + Math.random() * 15;
@@ -434,7 +453,10 @@ function spawnNormalBot() {
   pos.z = Math.max(-32, Math.min(32, pos.z));
   mesh.position.copy(pos);
   scene.add(mesh);
-  const bot = { mesh, teamKey: 'enemy', alive: true, home: new THREE.Vector3(0, 1, 0), attackCooldown: 0 };
+  const bot = {
+    mesh, teamKey: 'enemy', alive: true, home: new THREE.Vector3(0, 1, 0),
+    attackCooldown: 1 + Math.random(), weaponType,
+  };
   bots.push(bot);
   normalBots.push(bot);
   spawnClashFlash(pos, pos); // visible puff so a respawn is obvious, not just "a bot appeared somewhere"
@@ -474,11 +496,11 @@ function startNormalMode() {
 
 function normalBotRespawn() {
   setTimeout(() => {
-    if (phase === 'NORMAL_PLAYING') {
+    // cap total concurrent enemies so kills don't turn into a nonstop respawn treadmill
+    if (phase === 'NORMAL_PLAYING' && normalBots.filter(b => b.alive).length < NORMAL_BOT_COUNT) {
       spawnNormalBot();
-      logMsg('적이 새로 나타났습니다.');
     }
-  }, 2500);
+  }, 6000);
 }
 
 function updateNormalHud() {
@@ -486,15 +508,17 @@ function updateNormalHud() {
     모드: 일반<br>
     체력: ${Math.max(0, Math.round(playerHP))} / ${PLAYER_MAX_HP}<br>
     처치 수: ${normalScore}<br>
-    무기: ${weapon === 'gun' ? '총 (좌클릭 발사)' : weapon === 'sword' ? '칼 (좌클릭 찌르기 / 우클릭 던지기) - 닿기만 해도 처치!' : '맨손'}
+    무기: ${weapon === 'gun' ? '총 (좌클릭 발사)' : weapon === 'sword' ? '칼 (좌클릭 찌르기 / 우클릭 던지기) - 닿기만 해도 처치!' : '맨손'}<br>
+    적: 총을 든 적은 거리를 두고 사격, 칼을 든 적은 근접해서 공격합니다
   `;
 }
 
-// Enemies actively chase the player when close enough, instead of only wandering,
-// and deal contact damage; while the sword is equipped, touching an enemy shatters
-// them instantly (no need to swing).
+// Enemies actively engage the player instead of only wandering: sword-carriers
+// charge into melee, gun-carriers hang back at range and shoot. While the
+// player's sword is equipped, touching any enemy shatters them instantly.
 const NORMAL_AGGRO_RANGE = 18;
 const NORMAL_ATTACK_RANGE = 1.6;
+const NORMAL_GUN_RANGE = 12;
 function updateNormalCombat(dt) {
   for (const bot of normalBots) {
     if (!bot.alive) continue;
@@ -507,8 +531,29 @@ function updateNormalCombat(dt) {
       continue;
     }
 
-    if (dist < NORMAL_AGGRO_RANGE) {
-      bot.duel = true; // reuse the "don't wander" flag while chasing
+    if (dist >= NORMAL_AGGRO_RANGE) { bot.duel = false; continue; }
+    bot.duel = true; // reuse the "don't wander" flag while engaging
+
+    if (bot.weaponType === 'gun') {
+      // hold at range and shoot, rather than closing to melee
+      if (dist > NORMAL_GUN_RANGE + 2) {
+        toPlayer.normalize().multiplyScalar(dt * 2.2);
+        bot.mesh.position.add(toPlayer);
+      } else if (dist < NORMAL_GUN_RANGE - 2) {
+        toPlayer.normalize().multiplyScalar(-dt * 1.5); // back off
+        bot.mesh.position.add(toPlayer);
+      }
+      bot.attackCooldown -= dt;
+      if (bot.attackCooldown <= 0) {
+        bot.attackCooldown = 1.4;
+        const from = bot.mesh.position.clone(); from.y = 1.4;
+        const to = camera.position.clone();
+        spawnTracer(from, to, 0xffee88);
+        SFX.gunFire();
+        playerHP = Math.max(0, playerHP - 6);
+        if (playerHP <= 0) respawnPlayerNormal();
+      }
+    } else {
       if (dist > NORMAL_ATTACK_RANGE) {
         toPlayer.normalize().multiplyScalar(dt * 2.6);
         bot.mesh.position.add(toPlayer);
@@ -521,8 +566,6 @@ function updateNormalCombat(dt) {
           if (playerHP <= 0) respawnPlayerNormal();
         }
       }
-    } else {
-      bot.duel = false;
     }
   }
 }
