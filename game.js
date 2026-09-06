@@ -150,41 +150,111 @@ function onResize() {
   renderer.setSize(window.innerWidth, window.innerHeight);
 }
 
-/* ------------------------------ LOBBY UI ------------------------------ */
+/* ------------------------------ LOBBY (3D walk-in) ------------------------------ */
+const ROOMS = [
+  { key: '5v5', label: '5 / 5', size: 5, team: true },
+  { key: '4v4', label: '4 / 4', size: 4, team: true },
+  { key: '3v3', label: '3 / 3', size: 3, team: true },
+  { key: '2v2', label: '2 / 2', size: 2, team: true },
+  { key: '1v1', label: '1 / 1', size: 1, team: false },
+];
+const LOBBY_CIRCLE_RADIUS = 3.5;
+let lobbyGroup = null;
+let lobbyCircles = []; // { mesh, room, pos }
+let selectedRoom = null;
+let selectedItem = null;
+
+function buildLobbyScene() {
+  if (lobbyGroup) { scene.remove(lobbyGroup); }
+  lobbyGroup = new THREE.Group();
+  lobbyCircles = [];
+  const spacing = 14;
+  const startX = -((ROOMS.length - 1) * spacing) / 2;
+  ROOMS.forEach((room, i) => {
+    const pos = new THREE.Vector3(startX + i * spacing, 0.02, -10);
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(LOBBY_CIRCLE_RADIUS - 0.15, LOBBY_CIRCLE_RADIUS, 48),
+      new THREE.MeshBasicMaterial({ color: room.team ? 0x7fdcff : 0xffcf7f, side: THREE.DoubleSide })
+    );
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.copy(pos);
+    lobbyGroup.add(ring);
+
+    const label = makeTextSprite(`${room.label}\n${room.team ? '팀전' : '개인전'}`);
+    label.position.set(pos.x, 2.4, pos.z);
+    lobbyGroup.add(label);
+
+    lobbyCircles.push({ room, pos });
+  });
+  scene.add(lobbyGroup);
+}
+
+function makeTextSprite(text) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 256; canvas.height = 128;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 34px sans-serif';
+  ctx.textAlign = 'center';
+  const lines = text.split('\n');
+  lines.forEach((line, i) => ctx.fillText(line, canvas.width / 2, 52 + i * 42));
+  const tex = new THREE.CanvasTexture(canvas);
+  const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false });
+  const sprite = new THREE.Sprite(mat);
+  sprite.scale.set(4, 2, 1);
+  return sprite;
+}
+
 function showLobby() {
   phase = 'LOBBY';
   crosshair.style.display = 'none';
   hud.textContent = '';
   timerEl.textContent = '';
   towersEl.textContent = '';
-  msgEl.textContent = '';
+  msgEl.textContent = '이동: WASD, 시선: 마우스 — 원 안으로 걸어 들어가 방을 선택하세요.';
   cooldownFill.style.width = '0%';
   overlay.classList.remove('hidden');
   overlay.innerHTML = `
     <h1>로비</h1>
-    <p>참가할 방을 선택하세요 (원을 클릭)</p>
-    <div id="roomList"></div>
+    <p>클릭하여 시작한 뒤 WASD로 이동해 원하는 방의 원 안으로 걸어 들어가세요.</p>
+    <p style="opacity:0.7;">파란 원 = 팀전, 노란 원 = 개인전(1/1)</p>
   `;
-  const rooms = [
-    { key: '5v5', label: '5 / 5', size: 5, team: true },
-    { key: '4v4', label: '4 / 4', size: 4, team: true },
-    { key: '3v3', label: '3 / 3', size: 3, team: true },
-    { key: '2v2', label: '2 / 2', size: 2, team: true },
-    { key: '1v1', label: '1 / 1', size: 1, team: false },
-  ];
-  const listEl = overlay.querySelector('#roomList');
-  rooms.forEach(r => {
-    const div = document.createElement('div');
-    div.className = 'room-circle';
-    div.innerHTML = `<div>${r.label}</div><div style="font-size:11px;">${r.team ? '팀전' : '개인전'}</div>`;
-    div.onclick = () => { selectedRoom = r; showItemSelect(); };
-    listEl.appendChild(div);
-  });
+  buildLobbyScene();
+  for (const t of teams) { if (t.towerGroup) t.towerGroup.visible = false; }
+  for (const b of bots) { b.mesh.visible = false; }
+  playerObj = { pos: new THREE.Vector3(0, 1.7, 10), vel: new THREE.Vector3(), onGround: true };
+  camera.position.copy(playerObj.pos);
+  yaw = Math.PI; pitch = 0;
+  document.addEventListener('click', lobbyClickToStart);
 }
-let selectedRoom = null;
-let selectedItem = null;
+function lobbyClickToStart() {
+  if (phase !== 'LOBBY') return;
+  overlay.classList.add('hidden');
+  requestPointerLock();
+}
+
+function updateLobby(dt) {
+  updatePlayer(dt);
+  for (const c of lobbyCircles) {
+    const dx = camera.position.x - c.pos.x;
+    const dz = camera.position.z - c.pos.z;
+    if (Math.sqrt(dx * dx + dz * dz) < LOBBY_CIRCLE_RADIUS) {
+      document.removeEventListener('click', lobbyClickToStart);
+      selectedRoom = c.room;
+      scene.remove(lobbyGroup);
+      showItemSelect();
+      break;
+    }
+  }
+}
 
 function showItemSelect() {
+  phase = 'ITEM_SELECT';
+  document.exitPointerLock && document.exitPointerLock();
+  overlay.classList.remove('hidden');
+  msgEl.textContent = '';
   overlay.innerHTML = `
     <h1>아이템 선택</h1>
     <p>${selectedRoom.label} - ${selectedRoom.team ? '팀전' : '개인전'}</p>
@@ -314,7 +384,7 @@ document.addEventListener('pointerlockchange', () => {
   pointerLocked = document.pointerLockElement === renderer.domElement;
 });
 document.addEventListener('mousemove', (e) => {
-  if (!pointerLocked || phase !== 'PLAYING') return;
+  if (!pointerLocked || (phase !== 'PLAYING' && phase !== 'LOBBY')) return;
   yaw -= e.movementX * 0.0022;
   pitch -= e.movementY * 0.0022;
   pitch = Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05, pitch));
@@ -633,6 +703,10 @@ function endMatch() {
 function animate() {
   requestAnimationFrame(animate);
   const dt = Math.min(0.05, clock.getDelta());
+
+  if (phase === 'LOBBY' && pointerLocked) {
+    updateLobby(dt);
+  }
 
   if (phase === 'PLAYING' && matchRunning) {
     updatePlayer(dt);
