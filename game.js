@@ -324,6 +324,8 @@ function startMatch() {
   fireZone.active = false;
   snowTimeLeft = 0;
   botClashTimer = 8;
+  for (const d of dyingBots) scene.remove(d.mesh);
+  dyingBots = [];
   msgLog = [];
   logMsg(`매치 시작! 당신의 팀: ${playerTeam.def.name}`);
   requestPointerLock();
@@ -488,16 +490,48 @@ function resolvePlayerHit(bot) {
   removeBot(bot);
 }
 
+let dyingBots = []; // { mesh, t }
+
 function removeBot(bot) {
+  if (!bot.alive) return;
   bot.alive = false;
-  scene.remove(bot.mesh);
+  dyingBots.push({ mesh: bot.mesh, t: 0 });
   const team = teams.find(t => t.key === bot.teamKey);
-  if (team) {
-    team.players = team.players.filter(p => p !== bot);
-    if (team.players.length === 0 && team.key !== playerTeam.key) {
-      // no bots left, but keep team as "alive" flag governed by power/eliminate logic
+  if (team) team.players = team.players.filter(p => p !== bot);
+}
+
+function updateDyingBots(dt) {
+  for (let i = dyingBots.length - 1; i >= 0; i--) {
+    const d = dyingBots[i];
+    d.t += dt;
+    const s = Math.max(0, 1 - d.t / 0.4);
+    d.mesh.scale.setScalar(s);
+    d.mesh.position.y = Math.max(0.05, d.mesh.position.y - dt * 1.5);
+    if (d.t >= 0.4) {
+      scene.remove(d.mesh);
+      dyingBots.splice(i, 1);
     }
   }
+}
+
+function spawnClashFlash(posA, posB) {
+  const mid = new THREE.Vector3().addVectors(posA, posB).multiplyScalar(0.5);
+  const flash = new THREE.Mesh(
+    new THREE.SphereGeometry(1.5, 12, 12),
+    new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8 })
+  );
+  flash.position.copy(mid);
+  flash.position.y = 3;
+  scene.add(flash);
+  let t = 0;
+  const grow = () => {
+    t += 0.05;
+    flash.scale.setScalar(1 + t * 4);
+    flash.material.opacity = Math.max(0, 0.8 - t * 1.6);
+    if (t < 0.5) requestAnimationFrame(grow);
+    else scene.remove(flash);
+  };
+  grow();
 }
 
 /* ------------------------------ TEAM CLASH / RANK LOGIC ------------------------------ */
@@ -505,6 +539,7 @@ function rankOf(teamKey) { return ITEM_DEFS[teamKey].rank; }
 
 function clashTeams(teamA, teamB, fromPlayer) {
   if (!teamA.alive || !teamB.alive) return;
+  if (!fromPlayer) spawnClashFlash(teamA.pos, teamB.pos);
   const rA = rankOf(teamA.key), rB = rankOf(teamB.key);
   let winner, loser;
   if (rA < rB) { winner = teamA; loser = teamB; }
@@ -737,6 +772,7 @@ function animate() {
     updateBotClashes(dt);
     updateTimedEffects(dt);
     updateEffectMeshes(dt);
+    updateDyingBots(dt);
     updateHud();
 
     matchTimeLeft -= dt;
