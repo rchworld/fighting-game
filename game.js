@@ -320,10 +320,16 @@ function startMatch() {
   if (playerObj && playerObj.mesh) scene.remove(playerObj.mesh);
 
   const teamSize = selectedRoom.size;
-  const numTeams = ITEM_KEYS.length; // 7 teams, one per item type
-  const radius = 45;
+  // Team modes (2/2+): a clear 2-side battle (my team vs one rival team) so the
+  // fight is always nearby and visible. Solo mode (1/1): a 7-way free-for-all,
+  // one team per item, matching the "개인전" ranking-by-item design.
+  const activeKeys = selectedRoom.team
+    ? [selectedItem, ...ITEM_KEYS.filter(k => k !== selectedItem).sort(() => Math.random() - 0.5).slice(0, 1)]
+    : ITEM_KEYS;
+  const numTeams = activeKeys.length;
+  const radius = selectedRoom.team ? 22 : 45;
 
-  ITEM_KEYS.forEach((key, i) => {
+  activeKeys.forEach((key, i) => {
     const ang = (i / numTeams) * Math.PI * 2;
     const def = ITEM_DEFS[key];
     const team = {
@@ -356,7 +362,7 @@ function startMatch() {
   tornado.active = false;
   fireZone.active = false;
   snowTimeLeft = 0;
-  botClashTimer = 8;
+  botClashTimer = selectedRoom.team ? 4 : 8;
   for (const d of dyingBots) scene.remove(d.mesh);
   dyingBots = [];
   duelers = [];
@@ -394,20 +400,44 @@ function spawnBot(team) {
   head.position.y = 0.95;
   mesh.add(head);
 
-  // always-visible marker above the head, in the team color, so bots pop through fog/obstacles
-  const marker = new THREE.Sprite(new THREE.SpriteMaterial({ color: team.color, depthTest: false }));
-  marker.scale.set(0.35, 0.35, 1);
-  marker.position.y = 1.7;
+  // always-visible marker above the head: colored green (ally) / red (enemy) and
+  // kept up to date every frame, plus a floating "아군"/"적" text label, so it's
+  // always obvious who's on your side even after a team-swap.
+  const marker = new THREE.Sprite(new THREE.SpriteMaterial({ color: 0x33ff55, depthTest: false }));
+  marker.scale.set(0.4, 0.4, 1);
+  marker.position.y = 1.75;
   marker.renderOrder = 999;
   mesh.add(marker);
+
+  const label = makeTextSprite('아군');
+  label.scale.set(1.2, 0.6, 1);
+  label.position.y = 2.3;
+  label.material.depthTest = false;
+  label.renderOrder = 999;
+  mesh.add(label);
 
   const offset = new THREE.Vector3((Math.random() - 0.5) * 10, 1, (Math.random() - 0.5) * 10);
   mesh.position.copy(team.pos).add(offset);
   mesh.position.y = 1;
   scene.add(mesh);
-  const bot = { mesh, teamKey: team.key, wander: new THREE.Vector3().copy(mesh.position), alive: true };
+  const bot = { mesh, teamKey: team.key, wander: new THREE.Vector3().copy(mesh.position), alive: true, marker, label };
   bots.push(bot);
   team.players.push(bot);
+}
+
+function updateAllegianceMarkers() {
+  for (const bot of bots) {
+    if (!bot.alive) continue;
+    const isAlly = bot.teamKey === playerTeam.key;
+    bot.marker.material.color.set(isAlly ? 0x33ff55 : 0xff3333);
+    if (bot.label.userData.allyText !== isAlly) {
+      bot.label.userData.allyText = isAlly;
+      const tex = makeTextSprite(isAlly ? '아군' : '적').material.map;
+      bot.label.material.map.dispose();
+      bot.label.material.map = tex;
+      bot.label.material.needsUpdate = true;
+    }
+  }
 }
 
 function spawnPlayer(nearPos) {
@@ -442,13 +472,26 @@ document.addEventListener('pointerlockchange', () => {
   pointerLocked = document.pointerLockElement === renderer.domElement;
 });
 document.addEventListener('mousemove', (e) => {
-  if (!pointerLocked || (phase !== 'PLAYING' && phase !== 'LOBBY')) return;
-  yaw -= e.movementX * 0.0022;
-  pitch -= e.movementY * 0.0022;
-  pitch = Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05, pitch));
+  if (phase !== 'PLAYING' && phase !== 'LOBBY') return;
+  if (pointerLocked) {
+    yaw -= e.movementX * 0.0022;
+    pitch -= e.movementY * 0.0022;
+    pitch = Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05, pitch));
+  } else if (dragLooking) {
+    // fallback look control for environments where pointer lock is unavailable
+    // (e.g. the page opened directly as a file:// URL instead of via a server)
+    yaw -= e.movementX * 0.0022;
+    pitch -= e.movementY * 0.0022;
+    pitch = Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05, pitch));
+  }
 });
+let dragLooking = false;
 document.addEventListener('mousedown', (e) => {
-  if (phase !== 'PLAYING' || !pointerLocked) return;
+  if ((phase === 'PLAYING' || phase === 'LOBBY') && !pointerLocked && e.button === 0) dragLooking = true;
+});
+document.addEventListener('mouseup', () => { dragLooking = false; });
+document.addEventListener('mousedown', (e) => {
+  if (phase !== 'PLAYING') return;
   if (weapon === 'gun' && e.button === 0) fireGun();
   if (weapon === 'sword' && e.button === 0) swordThrust();
   if (weapon === 'sword' && e.button === 2) swordThrow();
@@ -505,7 +548,9 @@ function updateWeaponKick(dt) {
 function getForwardRay() {
   const dir = new THREE.Vector3();
   camera.getWorldDirection(dir);
-  return new THREE.Raycaster(camera.position, dir, 0.1, 200);
+  const ray = new THREE.Raycaster(camera.position, dir, 0.1, 200);
+  ray.camera = camera; // required for raycasting against Sprites (ally/enemy markers)
+  return ray;
 }
 
 function spawnTracer(start, end, color) {
@@ -810,7 +855,9 @@ function updateBots(dt) {
 function updateBotClashes(dt) {
   botClashTimer -= dt;
   if (botClashTimer <= 0) {
-    botClashTimer = 10 + Math.random() * 6;
+    // fewer teams (2-team battles) clash more often so the fight stays active and visible
+    const base = teams.length <= 2 ? 5 : 10;
+    botClashTimer = base + Math.random() * 4;
     const alive = teams.filter(t => t.alive);
     if (alive.length >= 2) {
       const a = alive[Math.floor(Math.random() * alive.length)];
@@ -905,7 +952,8 @@ function updateHud() {
   timerEl.textContent = `${min}:${sec}`;
 
   hud.innerHTML = `
-    내 팀: <b>${playerTeam.def.name}</b> (${playerTeam.alive ? '생존' : '멸망'})<br>
+    내 팀: <b>${playerTeam.def.name}</b> (${playerTeam.alive ? '생존' : '멸망'}) — <span style="color:#33ff55">초록 = 아군</span> / <span style="color:#ff3333">빨강 = 적</span><br>
+    아군 인원: ${playerTeam.players.length}명<br>
     팀 전력: ${Math.round(playerTeam.power)}%<br>
     탑 층수: ${playerTeam.floors}층<br>
     무기: ${weapon === 'gun' ? '총 (좌클릭 발사)' : weapon === 'sword' ? '칼 (좌클릭 찌르기 / 우클릭 던지기 / X 자살)' : '맨손'}<br>
@@ -941,7 +989,7 @@ function animate() {
   requestAnimationFrame(animate);
   const dt = Math.min(0.05, clock.getDelta());
 
-  if (phase === 'LOBBY' && pointerLocked) {
+  if (phase === 'LOBBY') {
     updateLobby(dt);
   }
 
@@ -954,6 +1002,7 @@ function animate() {
     updateDyingBots(dt);
     updateDuelers(dt);
     updateWeaponKick(dt);
+    updateAllegianceMarkers();
     updateHud();
 
     matchTimeLeft -= dt;
