@@ -155,12 +155,12 @@ function initThree() {
   floor.rotation.x = -Math.PI / 2;
   scene.add(floor);
 
-  // scattered dreamlike gray boxes
+  // scattered dreamlike brown boxes
   for (let i = 0; i < 40; i++) {
     const s = 1 + Math.random() * 2;
     const box = new THREE.Mesh(
       new THREE.BoxGeometry(s, s, s),
-      new THREE.MeshStandardMaterial({ color: 0xaaaaae })
+      new THREE.MeshStandardMaterial({ color: 0x8b5a2b })
     );
     const ang = Math.random() * Math.PI * 2;
     const rad = 10 + Math.random() * 70;
@@ -379,8 +379,28 @@ function buildTower(team) {
 }
 
 function spawnBot(team) {
-  const mat = new THREE.MeshStandardMaterial({ color: team.color });
-  const mesh = new THREE.Mesh(new THREE.CapsuleGeometry(0.4, 1.0, 4, 8), mat);
+  const mesh = new THREE.Group();
+
+  // darken pale team colors (ice/water/electric) so bots stand out against the gray sky/floor
+  const bodyColor = new THREE.Color(team.color).multiplyScalar(0.55);
+  const bodyMat = new THREE.MeshStandardMaterial({ color: bodyColor });
+  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.4, 1.0, 4, 8), bodyMat);
+  body.position.y = 0;
+  mesh.add(body);
+
+  // bright head so bots read as characters, not scenery
+  const headMat = new THREE.MeshStandardMaterial({ color: team.color, emissive: team.color, emissiveIntensity: 0.25 });
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.3, 10, 10), headMat);
+  head.position.y = 0.95;
+  mesh.add(head);
+
+  // always-visible marker above the head, in the team color, so bots pop through fog/obstacles
+  const marker = new THREE.Sprite(new THREE.SpriteMaterial({ color: team.color, depthTest: false }));
+  marker.scale.set(0.35, 0.35, 1);
+  marker.position.y = 1.7;
+  marker.renderOrder = 999;
+  mesh.add(marker);
+
   const offset = new THREE.Vector3((Math.random() - 0.5) * 10, 1, (Math.random() - 0.5) * 10);
   mesh.position.copy(team.pos).add(offset);
   mesh.position.y = 1;
@@ -403,6 +423,7 @@ function spawnPlayer(nearPos) {
 /* ------------------------------ INPUT ------------------------------ */
 window.addEventListener('keydown', (e) => {
   keys[e.code] = true;
+  if (e.code.startsWith('Arrow')) e.preventDefault(); // stop page scroll
   if (phase !== 'PLAYING') return;
   if (e.code === 'Digit1') toggleWeapon('gun');
   if (e.code === 'Digit2') toggleWeapon('sword');
@@ -506,19 +527,28 @@ function spawnStuckKnife(point, dir) {
   scene.add(knife);
 }
 
+function findBotByHitObject(obj) {
+  let o = obj;
+  while (o) {
+    const bot = bots.find(b => b.mesh === o);
+    if (bot) return bot;
+    o = o.parent;
+  }
+  return null;
+}
+
 function fireGun() {
   if (!playerTeam.alive) return;
   playWeaponKick();
   const ray = getForwardRay();
   ray.far = 200;
   const targets = bots.filter(b => b.alive).map(b => b.mesh);
-  const hits = ray.intersectObjects(targets, false);
+  const hits = ray.intersectObjects(targets, true);
   const dir = ray.ray.direction.clone();
   if (hits.length > 0) {
     spawnTracer(camera.position, hits[0].point, 0xffee88);
     SFX.gunFire();
-    const mesh = hits[0].object;
-    const bot = bots.find(b => b.mesh === mesh);
+    const bot = findBotByHitObject(hits[0].object);
     if (bot) resolvePlayerHit(bot);
   } else {
     spawnTracer(camera.position, camera.position.clone().add(dir.multiplyScalar(200)), 0xffee88);
@@ -534,10 +564,10 @@ function swordThrust() {
   ray.far = 2.5;
   const targets = bots.filter(b => b.alive).map(b => b.mesh);
   const objHits = ray.intersectObjects(scene.children.filter(o => o.userData.isObstacle));
-  const hits = ray.intersectObjects(targets, false);
+  const hits = ray.intersectObjects(targets, true);
   if (hits.length > 0) {
     SFX.swordHit();
-    const bot = bots.find(b => b.mesh === hits[0].object);
+    const bot = findBotByHitObject(hits[0].object);
     if (bot) resolvePlayerHit(bot);
   } else if (objHits.length > 0) {
     spawnStuckKnife(objHits[0].point, ray.ray.direction);
@@ -553,10 +583,10 @@ function swordThrow() {
   const ray = getForwardRay();
   ray.far = 40;
   const targets = bots.filter(b => b.alive).map(b => b.mesh);
-  const hits = ray.intersectObjects(targets, false);
+  const hits = ray.intersectObjects(targets, true);
   if (hits.length > 0) {
     SFX.swordHit();
-    const bot = bots.find(b => b.mesh === hits[0].object);
+    const bot = findBotByHitObject(hits[0].object);
     if (bot) resolvePlayerHit(bot);
     logMsg('던진 칼이 명중했습니다!');
   } else {
@@ -849,10 +879,10 @@ function updatePlayer(dt) {
   const forward = new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw)).multiplyScalar(-1);
   const right = new THREE.Vector3(forward.z, 0, -forward.x);
   const move = new THREE.Vector3();
-  if (keys['KeyW']) move.add(forward);
-  if (keys['KeyS']) move.sub(forward);
-  if (keys['KeyA']) move.sub(right);
-  if (keys['KeyD']) move.add(right);
+  if (keys['KeyW'] || keys['ArrowUp']) move.add(forward);
+  if (keys['KeyS'] || keys['ArrowDown']) move.sub(forward);
+  if (keys['KeyA'] || keys['ArrowLeft']) move.sub(right);
+  if (keys['KeyD'] || keys['ArrowRight']) move.add(right);
   if (move.lengthSq() > 0) move.normalize().multiplyScalar(speed * dt);
   camera.position.add(move);
   camera.position.y = 1.7;
