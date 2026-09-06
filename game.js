@@ -432,6 +432,7 @@ function spawnStuckKnife(point, dir) {
 }
 
 function fireGun() {
+  if (!playerTeam.alive) return;
   const ray = getForwardRay();
   ray.far = 200;
   const targets = bots.filter(b => b.alive).map(b => b.mesh);
@@ -449,6 +450,7 @@ function fireGun() {
 }
 
 function swordThrust() {
+  if (!playerTeam.alive) return;
   const ray = getForwardRay();
   ray.far = 2.5;
   const targets = bots.filter(b => b.alive).map(b => b.mesh);
@@ -465,6 +467,7 @@ function swordThrust() {
   }
 }
 function swordThrow() {
+  if (!playerTeam.alive) return;
   const ray = getForwardRay();
   ray.far = 40;
   const targets = bots.filter(b => b.alive).map(b => b.mesh);
@@ -479,6 +482,7 @@ function swordThrow() {
   weapon = null; // knife thrown away
 }
 function suicide() {
+  if (!playerTeam.alive) return;
   logMsg('스스로 목숨을 끊었습니다... 팀 전력이 급감합니다.');
   playerTeam.power = Math.max(0, playerTeam.power - 40);
   checkElimination(playerTeam);
