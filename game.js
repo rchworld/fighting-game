@@ -370,12 +370,6 @@ function clashTeams(teamA, teamB, fromPlayer) {
     const tmpPlayers = winner.players; winner.players = loser.players; loser.players = tmpPlayers;
     for (const b of winner.players) b.teamKey = winner.key;
     for (const b of loser.players) b.teamKey = loser.key;
-    if (playerTeam === winner) { /* player stays, but roster swapped conceptually */ }
-    if (playerTeam === loser) { /* same */ }
-    // if player was directly involved, swap player's own team assignment
-    if (fromPlayer) {
-      if (playerTeam === teamA) { playerTeam = winner === teamA ? teamA : teamB; }
-    }
     winner.floors += 1;
     buildTower(winner);
     loser.power = Math.max(10, loser.power - 15);
