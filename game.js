@@ -227,7 +227,8 @@ function showLobby() {
   playerObj = { pos: new THREE.Vector3(0, 1.7, 10), vel: new THREE.Vector3(), onGround: true };
   camera.position.copy(playerObj.pos);
   yaw = Math.PI; pitch = 0;
-  document.addEventListener('click', lobbyClickToStart);
+  document.removeEventListener('click', lobbyClickToStart);
+  setTimeout(() => document.addEventListener('click', lobbyClickToStart), 0);
 }
 function lobbyClickToStart() {
   if (phase !== 'LOBBY') return;
