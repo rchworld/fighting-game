@@ -627,7 +627,8 @@ function clashTeams(teamA, teamB, fromPlayer) {
   else if (rB < rA) { winner = teamB; loser = teamA; }
   else { winner = Math.random() < 0.5 ? teamA : teamB; loser = winner === teamA ? teamB : teamA; }
 
-  if (loser.power <= ELIMINATE_THRESHOLD) {
+  const rankGap = Math.abs(rA - rB);
+  if (loser.power <= ELIMINATE_THRESHOLD || rankGap >= 3) {
     eliminateTeam(loser);
     winner.floors += 1;
     buildTower(winner);
