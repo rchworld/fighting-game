@@ -17,6 +17,35 @@ const ITEM_COOLDOWN = 5;      // seconds
 const MATCH_SECONDS = 5 * 60; // 5 minutes
 const ELIMINATE_THRESHOLD = 30; // power below this after losing a clash => eliminated
 
+/* ------------------------------ SFX (synthesized, no assets) ------------------------------ */
+let audioCtx = null;
+function sfx(freq, dur, type, gainPeak) {
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = type || 'sine';
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(gainPeak || 0.15, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + dur);
+  } catch (e) { /* audio unavailable, ignore */ }
+}
+const SFX = {
+  gunFire: () => sfx(180, 0.08, 'square', 0.12),
+  gunMiss: () => sfx(140, 0.06, 'square', 0.06),
+  swordHit: () => sfx(500, 0.12, 'triangle', 0.15),
+  swordWhiff: () => sfx(300, 0.08, 'triangle', 0.06),
+  itemUse: () => sfx(700, 0.2, 'sine', 0.14),
+  teamSwap: () => sfx(440, 0.3, 'sawtooth', 0.13),
+  eliminate: () => sfx(120, 0.5, 'sawtooth', 0.18),
+  matchStart: () => sfx(880, 0.25, 'sine', 0.15),
+  matchEnd: () => sfx(220, 0.6, 'sine', 0.16),
+};
+
 let phase = 'LOBBY';
 let scene, camera, renderer, clock;
 let floor, skyFog;
@@ -330,6 +359,7 @@ function startMatch() {
   duelers = [];
   msgLog = [];
   logMsg(`매치 시작! 당신의 팀: ${playerTeam.def.name}`);
+  SFX.matchStart();
   requestPointerLock();
 }
 
@@ -440,11 +470,13 @@ function fireGun() {
   const dir = ray.ray.direction.clone();
   if (hits.length > 0) {
     spawnTracer(camera.position, hits[0].point, 0xffee88);
+    SFX.gunFire();
     const mesh = hits[0].object;
     const bot = bots.find(b => b.mesh === mesh);
     if (bot) resolvePlayerHit(bot);
   } else {
     spawnTracer(camera.position, camera.position.clone().add(dir.multiplyScalar(200)), 0xffee88);
+    SFX.gunMiss();
     logMsg('총알이 빗나갔습니다.');
   }
 }
@@ -457,12 +489,15 @@ function swordThrust() {
   const objHits = ray.intersectObjects(scene.children.filter(o => o.userData.isObstacle));
   const hits = ray.intersectObjects(targets, false);
   if (hits.length > 0) {
+    SFX.swordHit();
     const bot = bots.find(b => b.mesh === hits[0].object);
     if (bot) resolvePlayerHit(bot);
   } else if (objHits.length > 0) {
     spawnStuckKnife(objHits[0].point, ray.ray.direction);
+    SFX.swordWhiff();
     logMsg('칼이 물체에 꽂혔습니다.');
   } else {
+    SFX.swordWhiff();
     logMsg('허공을 찔렀습니다.');
   }
 }
@@ -473,10 +508,12 @@ function swordThrow() {
   const targets = bots.filter(b => b.alive).map(b => b.mesh);
   const hits = ray.intersectObjects(targets, false);
   if (hits.length > 0) {
+    SFX.swordHit();
     const bot = bots.find(b => b.mesh === hits[0].object);
     if (bot) resolvePlayerHit(bot);
     logMsg('던진 칼이 명중했습니다!');
   } else {
+    SFX.swordWhiff();
     logMsg('칼을 던졌지만 빗나갔습니다.');
   }
   weapon = null; // knife thrown away
@@ -565,6 +602,7 @@ function clashTeams(teamA, teamB, fromPlayer) {
     winner.floors += 1;
     buildTower(winner);
     loser.power = Math.max(10, loser.power - 15);
+    SFX.teamSwap();
     logMsg(`${winner.def.name} 팀이 ${loser.def.name} 팀을 이겨 팀이 교체되었습니다! (탑 ${winner.floors}층)`);
   }
 }
@@ -574,6 +612,7 @@ function eliminateTeam(team) {
   team.power = 0;
   for (const b of team.players) removeBot(b);
   team.players = [];
+  SFX.eliminate();
   if (team === playerTeam) {
     logMsg('당신의 팀이 멸망했습니다! 관전 모드로 전환됩니다.');
   }
@@ -590,6 +629,7 @@ function checkElimination(team) {
 function useItem() {
   if (itemCooldownLeft > 0 || !playerTeam.alive) return;
   itemCooldownLeft = ITEM_COOLDOWN;
+  SFX.itemUse();
   const key = playerTeam.key;
   const others = teams.filter(t => t.alive && t.key !== key);
   switch (key) {
@@ -803,6 +843,7 @@ function updateHud() {
 /* ------------------------------ RESULTS ------------------------------ */
 function endMatch() {
   matchRunning = false;
+  SFX.matchEnd();
   document.exitPointerLock && document.exitPointerLock();
   const sorted = [...teams].sort((a, b) => b.floors - a.floors || b.power - a.power || rankOf(a.key) - rankOf(b.key));
   overlay.classList.remove('hidden');
