@@ -195,36 +195,113 @@ let lobbyCircles = []; // { mesh, room, pos }
 let selectedRoom = null;
 let selectedItem = null;
 
+let lobbyBots = [];
+const LOBBY_NPC_COUNT = 16;
+
 function buildLobbyScene() {
   if (lobbyGroup) { scene.remove(lobbyGroup); }
+  for (const nb of lobbyBots) scene.remove(nb.mesh);
+  lobbyBots = [];
   lobbyGroup = new THREE.Group();
   lobbyCircles = [];
   const spacing = 14;
   const startX = -((ROOMS.length - 1) * spacing) / 2;
   ROOMS.forEach((room, i) => {
     const pos = new THREE.Vector3(startX + i * spacing, 0.02, -10);
-    const ring = new THREE.Mesh(
-      new THREE.RingGeometry(LOBBY_CIRCLE_RADIUS - 0.15, LOBBY_CIRCLE_RADIUS, 48),
-      new THREE.MeshBasicMaterial({ color: room.team ? 0x7fdcff : 0xffcf7f, side: THREE.DoubleSide })
+    const circleColor = room.team ? 0x2fb8ff : 0xffb23f;
+
+    // filled glowing disc on the ground (a thin flat ring is nearly invisible from eye height)
+    const disc = new THREE.Mesh(
+      new THREE.CircleGeometry(LOBBY_CIRCLE_RADIUS, 48),
+      new THREE.MeshBasicMaterial({ color: circleColor, transparent: true, opacity: 0.35, side: THREE.DoubleSide })
     );
-    ring.rotation.x = -Math.PI / 2;
-    ring.position.copy(pos);
-    lobbyGroup.add(ring);
+    disc.rotation.x = -Math.PI / 2;
+    disc.position.copy(pos);
+    lobbyGroup.add(disc);
+
+    // bright rim so the circle's edge reads clearly even from far away
+    const rim = new THREE.Mesh(
+      new THREE.RingGeometry(LOBBY_CIRCLE_RADIUS - 0.2, LOBBY_CIRCLE_RADIUS, 48),
+      new THREE.MeshBasicMaterial({ color: circleColor, side: THREE.DoubleSide })
+    );
+    rim.rotation.x = -Math.PI / 2;
+    rim.position.copy(pos).setY(pos.y + 0.01);
+    lobbyGroup.add(rim);
+
+    // a tall translucent beacon pillar, visible as a landmark from across the lobby
+    const beacon = new THREE.Mesh(
+      new THREE.CylinderGeometry(LOBBY_CIRCLE_RADIUS, LOBBY_CIRCLE_RADIUS, 8, 24, 1, true),
+      new THREE.MeshBasicMaterial({ color: circleColor, transparent: true, opacity: 0.12, side: THREE.DoubleSide })
+    );
+    beacon.position.set(pos.x, 4, pos.z);
+    lobbyGroup.add(beacon);
 
     const label = makeTextSprite(`${room.label}\n${room.team ? '팀전' : '개인전'}`);
     label.position.set(pos.x, 2.4, pos.z);
     lobbyGroup.add(label);
 
-    lobbyCircles.push({ room, pos });
+    const countLabel = makeDynamicLabel('0명', 'rgba(20,60,90,0.6)');
+    countLabel.sprite.position.set(pos.x, 3.6, pos.z);
+    lobbyGroup.add(countLabel.sprite);
+
+    lobbyCircles.push({ room, pos, countLabel, count: 0 });
   });
   scene.add(lobbyGroup);
+
+  // simulated other players wandering between circles and "voting" by standing in one
+  for (let i = 0; i < LOBBY_NPC_COUNT; i++) {
+    const mat = new THREE.MeshStandardMaterial({ color: new THREE.Color().setHSL(Math.random(), 0.4, 0.4) });
+    const mesh = new THREE.Mesh(new THREE.CapsuleGeometry(0.35, 0.9, 4, 8), mat);
+    const startCircle = lobbyCircles[Math.floor(Math.random() * lobbyCircles.length)];
+    mesh.position.set(
+      startCircle.pos.x + (Math.random() - 0.5) * 3,
+      0.95,
+      startCircle.pos.z + (Math.random() - 0.5) * 3
+    );
+    scene.add(mesh);
+    lobbyBots.push({ mesh, target: null, waitTimer: 1 + Math.random() * 4 });
+  }
+}
+
+function updateLobbyBots(dt) {
+  for (const nb of lobbyBots) {
+    nb.waitTimer -= dt;
+    if (!nb.target && nb.waitTimer <= 0) {
+      const c = lobbyCircles[Math.floor(Math.random() * lobbyCircles.length)];
+      nb.target = new THREE.Vector3(
+        c.pos.x + (Math.random() - 0.5) * (LOBBY_CIRCLE_RADIUS * 1.2),
+        0.95,
+        c.pos.z + (Math.random() - 0.5) * (LOBBY_CIRCLE_RADIUS * 1.2)
+      );
+    }
+    if (nb.target) {
+      const to = new THREE.Vector3().subVectors(nb.target, nb.mesh.position);
+      to.y = 0;
+      if (to.lengthSq() > 0.05) {
+        to.normalize().multiplyScalar(dt * 2.2);
+        nb.mesh.position.add(to);
+      } else {
+        nb.target = null;
+        nb.waitTimer = 2 + Math.random() * 5; // "vote" by staying a while
+      }
+    }
+  }
+  // recompute live headcounts (NPCs + the player, whichever circle each stands in)
+  for (const c of lobbyCircles) c.count = 0;
+  for (const nb of lobbyBots) {
+    for (const c of lobbyCircles) {
+      const dx = nb.mesh.position.x - c.pos.x, dz = nb.mesh.position.z - c.pos.z;
+      if (Math.sqrt(dx * dx + dz * dz) < LOBBY_CIRCLE_RADIUS) { c.count++; break; }
+    }
+  }
+  for (const c of lobbyCircles) c.countLabel.setText(`${c.count}명 대기중`);
 }
 
 function makeTextSprite(text) {
   const canvas = document.createElement('canvas');
   canvas.width = 256; canvas.height = 128;
   const ctx = canvas.getContext('2d');
-  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.fillStyle = 'rgba(15,15,20,0.75)';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.fillStyle = '#ffffff';
   ctx.font = 'bold 34px sans-serif';
@@ -236,6 +313,29 @@ function makeTextSprite(text) {
   const sprite = new THREE.Sprite(mat);
   sprite.scale.set(4, 2, 1);
   return sprite;
+}
+
+// A label sprite whose text can be redrawn in place (used for the live lobby headcount)
+function makeDynamicLabel(text, bg) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 256; canvas.height = 96;
+  const ctx = canvas.getContext('2d');
+  const tex = new THREE.CanvasTexture(canvas);
+  const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false });
+  const sprite = new THREE.Sprite(mat);
+  sprite.scale.set(3, 1.1, 1);
+  function setText(t) {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = bg || 'rgba(0,0,0,0.45)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 40px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(t, canvas.width / 2, 60);
+    tex.needsUpdate = true;
+  }
+  setText(text);
+  return { sprite, setText };
 }
 
 function showLobby() {
@@ -250,14 +350,14 @@ function showLobby() {
   overlay.innerHTML = `
     <h1>로비</h1>
     <p>클릭하여 시작한 뒤 WASD로 이동해 원하는 방의 원 안으로 걸어 들어가세요.</p>
-    <p style="opacity:0.7;">파란 원 = 팀전, 노란 원 = 개인전(1/1)</p>
+    <p style="opacity:0.7;">파란 원 = 팀전, 노란 원 = 개인전(1/1) — 다른 대기 중인 플레이어 수가 원 위에 표시됩니다.</p>
   `;
   buildLobbyScene();
   for (const t of teams) { if (t.towerGroup) t.towerGroup.visible = false; }
   for (const b of bots) { b.mesh.visible = false; }
   playerObj = { pos: new THREE.Vector3(0, 1.7, 10), vel: new THREE.Vector3(), onGround: true };
   camera.position.copy(playerObj.pos);
-  yaw = Math.PI; pitch = 0;
+  yaw = 0; pitch = 0; // face -Z, toward the circles (which sit at z=-10)
   document.removeEventListener('click', lobbyClickToStart);
   setTimeout(() => document.addEventListener('click', lobbyClickToStart), 0);
 }
@@ -269,6 +369,7 @@ function lobbyClickToStart() {
 
 function updateLobby(dt) {
   updatePlayer(dt);
+  updateLobbyBots(dt);
   for (const c of lobbyCircles) {
     const dx = camera.position.x - c.pos.x;
     const dz = camera.position.z - c.pos.z;
@@ -276,6 +377,8 @@ function updateLobby(dt) {
       document.removeEventListener('click', lobbyClickToStart);
       selectedRoom = c.room;
       scene.remove(lobbyGroup);
+      for (const nb of lobbyBots) scene.remove(nb.mesh);
+      lobbyBots = [];
       showItemSelect();
       break;
     }
