@@ -61,6 +61,7 @@ let keys = {};
 let yaw = 0, pitch = 0;
 let pointerLocked = false;
 let playerClimb = 0; // 0..1, how far up a tower's stairway the player currently is
+let jumpHeight = 0, jumpVel = 0; // Space bar jump physics
 const TOWER_COLLISION_RADIUS = 8; // spacious interior
 const DOOR_HALF_WIDTH = 1.05; // radians (~60 degrees each side = a wide, easy-to-hit doorway)
 let weapon = null;       // null | 'gun' | 'sword'
@@ -456,6 +457,7 @@ function spawnNormalBot() {
   const bot = {
     mesh, teamKey: 'enemy', alive: true, home: new THREE.Vector3(0, 1, 0),
     attackCooldown: 1 + Math.random(), weaponType,
+    jumpVel: 0, jumpH: 0, jumpTimer: 1 + Math.random() * 2,
   };
   bots.push(bot);
   normalBots.push(bot);
@@ -509,7 +511,8 @@ function updateNormalHud() {
     체력: ${Math.max(0, Math.round(playerHP))} / ${PLAYER_MAX_HP}<br>
     처치 수: ${normalScore}<br>
     무기: ${weapon === 'gun' ? '총 (좌클릭 발사)' : weapon === 'sword' ? '칼 (좌클릭 찌르기 / 우클릭 던지기) - 닿기만 해도 처치!' : '맨손'}<br>
-    적: 총을 든 적은 거리를 두고 사격, 칼을 든 적은 근접해서 공격합니다
+    적: 총을 든 적은 거리를 두고 사격, 칼을 든 적은 근접해서 공격합니다<br>
+    스페이스: 점프, C: 발차기
   `;
 }
 
@@ -522,6 +525,18 @@ const NORMAL_GUN_RANGE = 12;
 function updateNormalCombat(dt) {
   for (const bot of normalBots) {
     if (!bot.alive) continue;
+
+    // ninja-like hopping, so contact with the player (and shatter range) is less predictable
+    bot.jumpTimer -= dt;
+    if (bot.jumpTimer <= 0 && bot.jumpH <= 0.001) {
+      bot.jumpVel = 4 + Math.random() * 2;
+      bot.jumpTimer = 1 + Math.random() * 2.5;
+    }
+    bot.jumpVel -= 14 * dt;
+    bot.jumpH = Math.max(0, bot.jumpH + bot.jumpVel * dt);
+    if (bot.jumpH <= 0) { bot.jumpH = 0; bot.jumpVel = 0; }
+    bot.mesh.position.y = 1 + bot.jumpH;
+
     const toPlayer = new THREE.Vector3().subVectors(camera.position, bot.mesh.position);
     toPlayer.y = 0;
     const dist = toPlayer.length();
@@ -894,7 +909,7 @@ function isPlayingPhase() { return phase === 'PLAYING' || phase === 'NORMAL_PLAY
 
 window.addEventListener('keydown', (e) => {
   keys[e.code] = true;
-  if (e.code.startsWith('Arrow')) e.preventDefault(); // stop page scroll
+  if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault(); // stop page scroll
   if (e.code === 'KeyM' && (phase === 'NORMAL_PLAYING' || phase === 'LOBBY')) {
     document.exitPointerLock && document.exitPointerLock();
     showModeSelect();
@@ -905,6 +920,7 @@ window.addEventListener('keydown', (e) => {
   if (e.code === 'Digit2') toggleWeapon('sword');
   if (e.code === 'Enter') useItem();
   if (e.code === 'KeyX' && weapon === 'sword') suicide();
+  if (e.code === 'KeyC' && !e.repeat) performKick();
 });
 window.addEventListener('keyup', (e) => { keys[e.code] = false; });
 
@@ -1102,6 +1118,30 @@ function swordThrow() {
   }
   weapon = null; // knife thrown away
   updateWeaponModels();
+}
+
+// A bare-handed flying kick - works with any weapon (or none) equipped, so a jump
+// kick can finish off an enemy without needing to switch weapons mid-air.
+function performKick() {
+  if (!isPlayingPhase()) return;
+  if (gameMode === 'VARIANT' && (!playerTeam || !playerTeam.alive)) return;
+  const ray = getForwardRay();
+  ray.far = 2.4;
+  const targets = bots.filter(b => b.alive).map(b => b.mesh);
+  const hits = ray.intersectObjects(targets, true);
+  playWeaponKick();
+  if (hits.length > 0) {
+    SFX.swordHit();
+    const bot = findBotByHitObject(hits[0].object);
+    if (bot) {
+      if (gameMode === 'NORMAL') shatterBot(bot);
+      else stunThenKill(bot);
+    }
+    logMsg('발차기 명중!');
+  } else {
+    SFX.swordWhiff();
+    logMsg('발차기가 빗나갔습니다.');
+  }
 }
 function suicide() {
   if (gameMode !== 'VARIANT' || !playerTeam.alive) return;
@@ -1587,7 +1627,14 @@ function updatePlayer(dt) {
   if (keys['KeyD'] || keys['ArrowRight']) move.add(right);
   if (move.lengthSq() > 0) move.normalize().multiplyScalar(speed * dt);
   camera.position.add(move);
-  camera.position.y = 1.7;
+
+  // jump: a ninja-like hop, so you can close distance and kick over enemies' heads
+  if (isPlayingPhase()) {
+    if (keys['Space'] && jumpVel === 0 && jumpHeight <= 0.001) jumpVel = 6.5;
+    jumpVel -= 16 * dt; // gravity
+    jumpHeight = Math.max(0, jumpHeight + jumpVel * dt);
+    if (jumpHeight <= 0) { jumpHeight = 0; jumpVel = 0; }
+  }
 
   // simple bounds
   const bound = phase === 'NORMAL_PLAYING' ? NORMAL_BOUNDS : 95;
@@ -1621,7 +1668,7 @@ function updatePlayer(dt) {
       }
     }
   }
-  camera.position.y = 1.7 + playerClimb * 12; // climb toward the top floor near the tower's core
+  camera.position.y = 1.7 + playerClimb * 12 + jumpHeight; // climb toward the top floor near the tower's core, plus any jump
 }
 
 /* ------------------------------ HUD ------------------------------ */
