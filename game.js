@@ -396,15 +396,85 @@ function buildCabin() {
     mesh.position.set(w.pos[0], w.pos[1], w.pos[2]);
     cabinGroup.add(mesh);
   });
-  // a few interior support beams for cover
-  const beamMat = new THREE.MeshStandardMaterial({ color: 0x5a3a1a });
-  for (let i = 0; i < 8; i++) {
-    const beam = new THREE.Mesh(new THREE.BoxGeometry(1.2, wallH, 1.2), beamMat);
-    const ang = (i / 8) * Math.PI * 2;
-    beam.position.set(Math.cos(ang) * 20, wallH / 2, Math.sin(ang) * 20);
-    cabinGroup.add(beam);
-  }
+
+  // windows: light panels set into the outer walls
+  const windowMat = new THREE.MeshStandardMaterial({ color: 0xbfe6ff, emissive: 0x88ccee, emissiveIntensity: 0.4, transparent: true, opacity: 0.75 });
+  const winSpots = [-24, 0, 24];
+  winSpots.forEach(x => {
+    const win = new THREE.Mesh(new THREE.BoxGeometry(5, 3.5, 0.15), windowMat);
+    win.position.set(x, 5, -size / 2 - 0.1);
+    cabinGroup.add(win);
+    const win2 = win.clone();
+    win2.position.set(x, 5, size / 2 + 0.1);
+    cabinGroup.add(win2);
+  });
+
+  // divide the interior into a 3x3 grid of rooms, with a doorway through the
+  // middle of each divider so every room connects to at least the center row/column
+  const divMat = new THREE.MeshStandardMaterial({ color: 0x5a3a1a });
+  const divPositions = [-size / 6, size / 6];
+  const doorGap = 6;
+  divPositions.forEach(pos => {
+    // vertical divider (runs along Z, fixed X), split around a center doorway
+    [[-size / 2, -doorGap / 2], [doorGap / 2, size / 2]].forEach(([from, to]) => {
+      const len = to - from;
+      const seg = new THREE.Mesh(new THREE.BoxGeometry(wallT, wallH, len), divMat);
+      seg.position.set(pos, wallH / 2, from + len / 2);
+      cabinGroup.add(seg);
+    });
+    // horizontal divider (runs along X, fixed Z)
+    [[-size / 2, -doorGap / 2], [doorGap / 2, size / 2]].forEach(([from, to]) => {
+      const len = to - from;
+      const seg = new THREE.Mesh(new THREE.BoxGeometry(len, wallH, wallT), divMat);
+      seg.position.set(from + len / 2, wallH / 2, pos);
+      cabinGroup.add(seg);
+    });
+  });
+
+  // furnish each of the 9 rooms with a lamp, bed, chair, plus interior windows on
+  // exterior-facing rooms already covered above
+  const roomCenters = [-size / 3, 0, size / 3];
+  roomCenters.forEach(rx => roomCenters.forEach(rz => addRoomFurniture(rx, rz)));
+
   scene.add(cabinGroup);
+}
+
+function addRoomFurniture(cx, cz) {
+  const woodMat = new THREE.MeshStandardMaterial({ color: 0x8b5a2b });
+  const fabricMat = new THREE.MeshStandardMaterial({ color: 0x3a5f8a });
+  const pillowMat = new THREE.MeshStandardMaterial({ color: 0xf0e6d2 });
+
+  // bed: mattress + pillow, tucked in one corner
+  const bed = new THREE.Mesh(new THREE.BoxGeometry(4, 0.8, 6), fabricMat);
+  bed.position.set(cx - 6, 0.4, cz - 6);
+  cabinGroup.add(bed);
+  const pillow = new THREE.Mesh(new THREE.BoxGeometry(3.2, 0.5, 1.4), pillowMat);
+  pillow.position.set(cx - 6, 0.85, cz - 8.7);
+  cabinGroup.add(pillow);
+
+  // chair: seat + backrest
+  const seat = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.15, 1.4), woodMat);
+  seat.position.set(cx + 6, 1, cz + 6);
+  cabinGroup.add(seat);
+  const back = new THREE.Mesh(new THREE.BoxGeometry(1.4, 1.4, 0.15), woodMat);
+  back.position.set(cx + 6, 1.7, cz + 6.65);
+  cabinGroup.add(back);
+  [-0.6, 0.6].forEach(dx => [-0.6, 0.6].forEach(dz => {
+    const leg = new THREE.Mesh(new THREE.BoxGeometry(0.15, 1, 0.15), woodMat);
+    leg.position.set(cx + 6 + dx, 0.5, cz + 6 + dz);
+    cabinGroup.add(leg);
+  }));
+
+  // lamp: pole + glowing shade
+  const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 2.4, 8), woodMat);
+  pole.position.set(cx + 7, 1.2, cz - 7);
+  cabinGroup.add(pole);
+  const shade = new THREE.Mesh(
+    new THREE.SphereGeometry(0.5, 10, 10),
+    new THREE.MeshStandardMaterial({ color: 0xfff2c0, emissive: 0xffdd66, emissiveIntensity: 0.9 })
+  );
+  shade.position.set(cx + 7, 2.5, cz - 7);
+  cabinGroup.add(shade);
 }
 
 let normalBots = [];
