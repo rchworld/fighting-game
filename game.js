@@ -62,6 +62,24 @@ let yaw = 0, pitch = 0;
 let pointerLocked = false;
 let playerClimb = 0; // 0..1, how far up a tower's stairway the player currently is
 let jumpHeight = 0, jumpVel = 0; // Space bar jump physics
+let collidables = []; // { minX, maxX, minZ, maxZ, skip? } - walls/furniture/chairs the player can't walk through
+
+function addCollidableBox(cx, cz, halfW, halfD) {
+  collidables.push({ minX: cx - halfW, maxX: cx + halfW, minZ: cz - halfD, maxZ: cz + halfD });
+}
+function pushOutOfCollidables(pos) {
+  for (const box of collidables) {
+    if (box.skip) continue;
+    if (pos.x < box.minX || pos.x > box.maxX || pos.z < box.minZ || pos.z > box.maxZ) continue;
+    const dLeft = pos.x - box.minX, dRight = box.maxX - pos.x;
+    const dFront = pos.z - box.minZ, dBack = box.maxZ - pos.z;
+    const min = Math.min(dLeft, dRight, dFront, dBack);
+    if (min === dLeft) pos.x = box.minX;
+    else if (min === dRight) pos.x = box.maxX;
+    else if (min === dFront) pos.z = box.minZ;
+    else pos.z = box.maxZ;
+  }
+}
 const TOWER_COLLISION_RADIUS = 8; // spacious interior
 const DOOR_HALF_WIDTH = 1.05; // radians (~60 degrees each side = a wide, easy-to-hit doorway)
 let weapon = null;       // null | 'gun' | 'sword'
@@ -370,10 +388,15 @@ function showModeSelect() {
         <div style="font-size:20px; font-weight:bold;">변형</div>
         <div style="font-size:12px; opacity:0.8; margin-top:8px;">아이템, 탑, 팀 교체<br>5분 매치</div>
       </div>
+      <div id="modeTag" class="item-btn" style="width:160px; height:140px; flex-direction:column;">
+        <div style="font-size:20px; font-weight:bold;">술래잡기</div>
+        <div style="font-size:12px; opacity:0.8; margin-top:8px;">20명, 의자 19개<br>술래에게 닿으면 탈락</div>
+      </div>
     </div>
   `;
   overlay.querySelector('#modeNormal').onclick = () => { gameMode = 'NORMAL'; startNormalMode(); };
   overlay.querySelector('#modeVariant').onclick = () => { gameMode = 'VARIANT'; showLobby(); };
+  overlay.querySelector('#modeTag').onclick = () => { gameMode = 'TAG'; startTagMode(); };
 }
 
 /* ------------------------------ NORMAL MODE (총과 칼만 있는 단순 난투) ------------------------------ */
@@ -383,6 +406,7 @@ const NORMAL_BOT_COUNT = 8;
 function buildCabin() {
   if (cabinGroup) scene.remove(cabinGroup);
   cabinGroup = new THREE.Group();
+  collidables = [];
   const wallMat = new THREE.MeshStandardMaterial({ color: 0x6b4423 });
   const size = 70, wallH = 10, wallT = 1;
   const walls = [
@@ -395,6 +419,7 @@ function buildCabin() {
     const mesh = new THREE.Mesh(new THREE.BoxGeometry(w.w, w.h, w.d), wallMat);
     mesh.position.set(w.pos[0], w.pos[1], w.pos[2]);
     cabinGroup.add(mesh);
+    addCollidableBox(w.pos[0], w.pos[2], w.w / 2, w.d / 2);
   });
 
   // windows: light panels set into the outer walls
@@ -421,6 +446,7 @@ function buildCabin() {
       const seg = new THREE.Mesh(new THREE.BoxGeometry(wallT, wallH, len), divMat);
       seg.position.set(pos, wallH / 2, from + len / 2);
       cabinGroup.add(seg);
+      addCollidableBox(pos, from + len / 2, wallT / 2, len / 2);
     });
     // horizontal divider (runs along X, fixed Z)
     [[-size / 2, -doorGap / 2], [doorGap / 2, size / 2]].forEach(([from, to]) => {
@@ -428,6 +454,7 @@ function buildCabin() {
       const seg = new THREE.Mesh(new THREE.BoxGeometry(len, wallH, wallT), divMat);
       seg.position.set(from + len / 2, wallH / 2, pos);
       cabinGroup.add(seg);
+      addCollidableBox(from + len / 2, pos, len / 2, wallT / 2);
     });
   });
 
@@ -451,6 +478,7 @@ function addRoomFurniture(cx, cz) {
   const pillow = new THREE.Mesh(new THREE.BoxGeometry(3.2, 0.5, 1.4), pillowMat);
   pillow.position.set(cx - 6, 0.85, cz - 8.7);
   cabinGroup.add(pillow);
+  addCollidableBox(cx - 6, cz - 7, 2, 3.5);
 
   // chair: seat + backrest
   const seat = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.15, 1.4), woodMat);
@@ -464,11 +492,13 @@ function addRoomFurniture(cx, cz) {
     leg.position.set(cx + 6 + dx, 0.5, cz + 6 + dz);
     cabinGroup.add(leg);
   }));
+  addCollidableBox(cx + 6, cz + 6, 0.8, 0.8);
 
   // lamp: pole + glowing shade
   const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 2.4, 8), woodMat);
   pole.position.set(cx + 7, 1.2, cz - 7);
   cabinGroup.add(pole);
+  addCollidableBox(cx + 7, cz - 7, 0.3, 0.3);
   const shade = new THREE.Mesh(
     new THREE.SphereGeometry(0.5, 10, 10),
     new THREE.MeshStandardMaterial({ color: 0xfff2c0, emissive: 0xffdd66, emissiveIntensity: 0.9 })
@@ -700,6 +730,272 @@ function resetNormalModeVisuals() {
   for (const b of normalBots) scene.remove(b.mesh);
   normalBots = [];
   bots = bots.filter(b => !b.mesh || b.teamKey !== 'enemy');
+  collidables = [];
+  resetTagModeVisuals();
+}
+
+/* ------------------------------ TAG MODE (술래잡기 + 매직 체어) ------------------------------ */
+const TAG_CHAIR_COUNT = 19;
+const TAG_BOT_COUNT = 19; // + the player = 20 participants total
+const TAG_ARENA_RADIUS = 20;
+let tagChairs = [];
+let tagBots = [];
+let taggerIsPlayer = false;
+let taggerBot = null;
+let playerSeated = false;
+let playerEliminated = false;
+let tagResultShown = false;
+
+function resetTagModeVisuals() {
+  for (const c of tagChairs) scene.remove(c.mesh);
+  tagChairs = [];
+  for (const b of tagBots) scene.remove(b.mesh);
+  tagBots = [];
+}
+
+function buildChairMesh() {
+  const g = new THREE.Group();
+  const woodMat = new THREE.MeshStandardMaterial({ color: 0x8b5a2b });
+  const seat = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.15, 1.4), woodMat);
+  seat.position.y = 1;
+  g.add(seat);
+  const back = new THREE.Mesh(new THREE.BoxGeometry(1.4, 1.4, 0.15), woodMat);
+  back.position.set(0, 1.7, 0.65);
+  g.add(back);
+  [-0.6, 0.6].forEach(dx => [-0.6, 0.6].forEach(dz => {
+    const leg = new THREE.Mesh(new THREE.BoxGeometry(0.15, 1, 0.15), woodMat);
+    leg.position.set(dx, 0.5, dz);
+    g.add(leg);
+  }));
+  return g;
+}
+
+function spawnTagBot() {
+  const mesh = new THREE.Group();
+  const bodyMat = new THREE.MeshStandardMaterial({ color: 0x336699 });
+  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.4, 1.0, 4, 8), bodyMat);
+  mesh.add(body);
+  const headMat = new THREE.MeshStandardMaterial({ color: 0x3399ff, emissive: 0x224466, emissiveIntensity: 0.25 });
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.3, 10, 10), headMat);
+  head.position.y = 0.95;
+  mesh.add(head);
+  const marker = new THREE.Sprite(new THREE.SpriteMaterial({ color: 0x3399ff, depthTest: false }));
+  marker.scale.set(0.4, 0.4, 1);
+  marker.position.y = 1.75;
+  marker.renderOrder = 999;
+  mesh.add(marker);
+
+  const ang = Math.random() * Math.PI * 2;
+  const dist = 5 + Math.random() * (TAG_ARENA_RADIUS - 5);
+  mesh.position.set(Math.cos(ang) * dist, 1, Math.sin(ang) * dist);
+  scene.add(mesh);
+  const bot = { mesh, body, bodyMat, marker, alive: true, seated: false, isTagger: false, wanderTimer: Math.random() * 2 };
+  tagBots.push(bot);
+  return bot;
+}
+
+function markBotAsTagger(bot) {
+  bot.isTagger = true;
+  bot.bodyMat.color.set(0xdd3311);
+  bot.bodyMat.emissive.set(0x661100);
+  bot.bodyMat.emissiveIntensity = 0.4;
+  bot.marker.material.color.set(0xff3300);
+}
+
+function startTagMode() {
+  overlay.classList.add('hidden');
+  crosshair.style.display = 'block';
+  phase = 'TAG_PLAYING';
+
+  for (const t of teams) if (t.towerGroup) scene.remove(t.towerGroup);
+  teams = [];
+  for (const b of bots) scene.remove(b.mesh);
+  bots = [];
+  for (const d of dyingBots) scene.remove(d.mesh);
+  dyingBots = [];
+  duelers = [];
+  if (cabinGroup) { scene.remove(cabinGroup); cabinGroup = null; }
+  resetTagModeVisuals();
+
+  floor.material.color.set(0x9a9a9e);
+  for (const b of obstacleBoxes) b.visible = false;
+  collidables = [];
+
+  camera.position.set(0, 1.7, TAG_ARENA_RADIUS + 10);
+  yaw = 0; pitch = 0; // face -Z, toward the chairs at the arena center
+  weapon = null;
+  updateWeaponModels();
+  playerSeated = false;
+  playerEliminated = false;
+  tagResultShown = false;
+  msgLog = [];
+
+  // chairs in a ring at the center of the arena
+  for (let i = 0; i < TAG_CHAIR_COUNT; i++) {
+    const ang = (i / TAG_CHAIR_COUNT) * Math.PI * 2;
+    const pos = new THREE.Vector3(Math.cos(ang) * 8, 0, Math.sin(ang) * 8);
+    const mesh = buildChairMesh();
+    mesh.position.copy(pos);
+    mesh.lookAt(0, 0, 0);
+    scene.add(mesh);
+    addCollidableBox(pos.x, pos.z, 0.8, 0.8);
+    tagChairs.push({ mesh, pos, occupied: false, occupant: null });
+  }
+
+  for (let i = 0; i < TAG_BOT_COUNT; i++) spawnTagBot();
+
+  // randomly pick one of the 20 participants (player included) to be the tagger
+  const pick = Math.floor(Math.random() * (TAG_BOT_COUNT + 1));
+  if (pick === 0) {
+    taggerIsPlayer = true;
+    logMsg('당신이 술래입니다! 다른 참가자와 부딪히면 탈락시킵니다.');
+  } else {
+    taggerIsPlayer = false;
+    taggerBot = tagBots[pick - 1];
+    markBotAsTagger(taggerBot);
+    logMsg('술래가 정해졌습니다! 의자로 도망가서 E키를 눌러 앉으세요.');
+  }
+
+  requestPointerLock();
+}
+
+function sitInNearbyChair() {
+  if (taggerIsPlayer || playerSeated || playerEliminated) return;
+  for (const chair of tagChairs) {
+    if (chair.occupied) continue;
+    const dx = camera.position.x - chair.pos.x, dz = camera.position.z - chair.pos.z;
+    if (Math.sqrt(dx * dx + dz * dz) < 2.2) {
+      chair.occupied = true;
+      chair.occupant = 'player';
+      playerSeated = true;
+      logMsg('의자에 앉았습니다! 안전합니다.');
+      SFX.itemUse();
+      return;
+    }
+  }
+}
+
+function eliminateTagBot(bot) {
+  if (!bot.alive) return;
+  bot.alive = false;
+  scene.remove(bot.mesh);
+  const chair = tagChairs.find(c => c.occupant === bot);
+  if (chair) { chair.occupied = false; chair.occupant = null; }
+}
+
+function updateTagMode(dt) {
+  if (tagResultShown) return;
+
+  // player-controlled tagger: touching any unseated bot eliminates it
+  if (taggerIsPlayer && !playerEliminated) {
+    for (const bot of tagBots) {
+      if (!bot.alive || bot.seated) continue;
+      const dx = camera.position.x - bot.mesh.position.x, dz = camera.position.z - bot.mesh.position.z;
+      if (Math.sqrt(dx * dx + dz * dz) < 1.5) {
+        eliminateTagBot(bot);
+        SFX.eliminate();
+        logMsg('한 명을 탈락시켰습니다!');
+      }
+    }
+  }
+
+  for (const bot of tagBots) {
+    if (!bot.alive) continue;
+
+    if (bot.isTagger) {
+      // chase the nearest unseated, un-eliminated target (player or another bot)
+      let targetPos = null, targetIsPlayer = false, bestDist = Infinity;
+      if (!taggerIsPlayer && !playerSeated && !playerEliminated) {
+        const d = camera.position.distanceTo(bot.mesh.position);
+        if (d < bestDist) { bestDist = d; targetPos = camera.position; targetIsPlayer = true; }
+      }
+      for (const other of tagBots) {
+        if (other === bot || !other.alive || other.seated) continue;
+        const d = other.mesh.position.distanceTo(bot.mesh.position);
+        if (d < bestDist) { bestDist = d; targetPos = other.mesh.position; targetIsPlayer = false; }
+      }
+      if (targetPos) {
+        const toTarget = new THREE.Vector3().subVectors(targetPos, bot.mesh.position);
+        toTarget.y = 0;
+        if (toTarget.length() > 1.4) {
+          toTarget.normalize().multiplyScalar(dt * 3.4);
+          bot.mesh.position.add(toTarget);
+        } else if (targetIsPlayer) {
+          playerEliminated = true;
+          logMsg('술래에게 잡혔습니다... 탈락!');
+          SFX.eliminate();
+        } else {
+          const caughtBot = tagBots.find(b => b.alive && !b.seated && b !== bot && b.mesh.position.distanceTo(bot.mesh.position) < 1.6);
+          if (caughtBot) { eliminateTagBot(caughtBot); SFX.eliminate(); }
+        }
+      }
+      continue;
+    }
+
+    if (bot.seated) continue;
+
+    // non-tagger bots flee toward the nearest empty chair
+    let nearestChair = null, nearestDist = Infinity;
+    for (const chair of tagChairs) {
+      if (chair.occupied) continue;
+      const d = chair.pos.distanceTo(bot.mesh.position);
+      if (d < nearestDist) { nearestDist = d; nearestChair = chair; }
+    }
+    if (nearestChair) {
+      if (nearestDist < 1.5) {
+        nearestChair.occupied = true;
+        nearestChair.occupant = bot;
+        bot.seated = true;
+        bot.mesh.position.set(nearestChair.pos.x, 1, nearestChair.pos.z);
+      } else {
+        const toChair = new THREE.Vector3().subVectors(nearestChair.pos, bot.mesh.position);
+        toChair.y = 0;
+        toChair.normalize().multiplyScalar(dt * 2.4);
+        bot.mesh.position.add(toChair);
+      }
+    }
+  }
+
+  // end condition: no unseated, un-eliminated non-tagger participants remain
+  const stillStanding = tagBots.filter(b => b.alive && !b.seated && !b.isTagger).length
+    + ((!taggerIsPlayer && !playerSeated && !playerEliminated) ? 1 : 0);
+  if (stillStanding <= 0 || (taggerIsPlayer && playerEliminated)) {
+    showTagResults();
+  } else if (!taggerIsPlayer && playerEliminated) {
+    showTagResults();
+  }
+}
+
+function showTagResults() {
+  if (tagResultShown) return;
+  tagResultShown = true;
+  matchRunning = false;
+  document.exitPointerLock && document.exitPointerLock();
+  const seatedCount = tagChairs.filter(c => c.occupied).length;
+  const eliminatedCount = tagBots.filter(b => !b.alive).length;
+  let playerLine;
+  if (taggerIsPlayer) playerLine = `당신은 술래로 ${eliminatedCount}명을 탈락시켰습니다.`;
+  else if (playerEliminated) playerLine = '당신은 술래에게 잡혀 탈락했습니다.';
+  else if (playerSeated) playerLine = '당신은 의자에 앉아 생존했습니다!';
+  else playerLine = '당신은 끝까지 살아남았습니다!';
+
+  overlay.classList.remove('hidden');
+  overlay.innerHTML = `
+    <h1>게임 종료</h1>
+    <p style="font-size:18px;">${playerLine}</p>
+    <p>생존(의자 착석): ${seatedCount}명 / 탈락: ${eliminatedCount}명</p>
+    <button id="tagAgainBtn" style="margin-top:16px; padding:10px 20px; font-size:16px;">모드 선택으로</button>
+  `;
+  overlay.querySelector('#tagAgainBtn').onclick = showModeSelect;
+}
+
+function updateTagHud() {
+  hud.innerHTML = `
+    모드: 술래잡기<br>
+    역할: ${taggerIsPlayer ? '<b style="color:#ff5533">술래</b>' : (playerSeated ? '앉음(안전)' : playerEliminated ? '탈락' : '도망 중')}<br>
+    ${taggerIsPlayer ? '' : 'E: 근처 의자에 앉기<br>'}
+    남은 의자: ${tagChairs.filter(c => !c.occupied).length} / ${TAG_CHAIR_COUNT}
+  `;
 }
 
 function showLobby() {
@@ -975,17 +1271,21 @@ function spawnPlayer(nearPos) {
 }
 
 /* ------------------------------ INPUT ------------------------------ */
-function isPlayingPhase() { return phase === 'PLAYING' || phase === 'NORMAL_PLAYING'; }
+function isPlayingPhase() { return phase === 'PLAYING' || phase === 'NORMAL_PLAYING' || phase === 'TAG_PLAYING'; }
 
 window.addEventListener('keydown', (e) => {
   keys[e.code] = true;
   if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault(); // stop page scroll
-  if (e.code === 'KeyM' && (phase === 'NORMAL_PLAYING' || phase === 'LOBBY')) {
+  if (e.code === 'KeyM' && (phase === 'NORMAL_PLAYING' || phase === 'TAG_PLAYING' || phase === 'LOBBY')) {
     document.exitPointerLock && document.exitPointerLock();
     showModeSelect();
     return;
   }
   if (!isPlayingPhase()) return;
+  if (phase === 'TAG_PLAYING') {
+    if (e.code === 'KeyE') sitInNearbyChair();
+    return;
+  }
   if (e.code === 'Digit1') toggleWeapon('gun');
   if (e.code === 'Digit2') toggleWeapon('sword');
   if (e.code === 'Enter') useItem();
@@ -1707,9 +2007,12 @@ function updatePlayer(dt) {
   }
 
   // simple bounds
-  const bound = phase === 'NORMAL_PLAYING' ? NORMAL_BOUNDS : 95;
+  const bound = (phase === 'NORMAL_PLAYING' || phase === 'TAG_PLAYING') ? NORMAL_BOUNDS : 95;
   camera.position.x = Math.max(-bound, Math.min(bound, camera.position.x));
   camera.position.z = Math.max(-bound, Math.min(bound, camera.position.z));
+
+  // walls, furniture, and chairs block movement instead of letting the player walk through them
+  if (phase === 'NORMAL_PLAYING' || phase === 'TAG_PLAYING') pushOutOfCollidables(camera.position);
 
   // Team factory towers: solid on the outside, but each has a doorway (facing the
   // arena center) you can walk through, and walking toward the middle climbs the
@@ -1822,6 +2125,12 @@ function animate() {
     updateDyingBots(dt);
     updateWeaponKick(dt);
     updateNormalHud();
+  }
+
+  if (phase === 'TAG_PLAYING') {
+    updatePlayer(dt);
+    updateTagMode(dt);
+    updateTagHud();
   }
 
   renderer.render(scene, camera);
