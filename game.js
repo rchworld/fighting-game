@@ -762,6 +762,7 @@ let tagResultShown = false;
 let tagPlate = null;
 let plateSpinning = true;
 let plateTimer = 0;
+let tagWobbleTimer = 0;
 let playerCarrying = null; // a tagChairs entry, or null
 
 function resetTagModeVisuals() {
@@ -848,12 +849,20 @@ function startTagMode() {
   playerSeated = false;
   playerEliminated = false;
   tagResultShown = false;
+  tagWobbleTimer = 0;
   msgLog = [];
 
   // the spinning plate (turntable) at the arena center - chairs sit on its edge
   const plateMat = new THREE.MeshStandardMaterial({ color: 0xaa7733, metalness: 0.3, roughness: 0.6 });
   tagPlate = new THREE.Mesh(new THREE.CylinderGeometry(10, 10, 0.4, 40), plateMat);
   tagPlate.position.y = 0.05;
+  // radial stripes so the spin is actually visible (a plain disc looks static)
+  const stripeMat = new THREE.MeshStandardMaterial({ color: 0x5a3a1a });
+  for (let i = 0; i < 8; i++) {
+    const stripe = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.42, 10), stripeMat);
+    stripe.rotation.y = (i / 8) * Math.PI * 2;
+    tagPlate.add(stripe);
+  }
   scene.add(tagPlate);
   plateSpinning = true;
   plateTimer = 5 + Math.random() * 3;
@@ -958,7 +967,24 @@ function updateTagMode(dt) {
 
   // the spinning plate: spins for a while, then briefly stops - anyone carrying a
   // chair at that instant sits down safely
-  if (tagPlate) tagPlate.rotation.y += dt * (plateSpinning ? 3.2 : 0);
+  const spinSpeed = 3.2;
+  const spinDelta = dt * (plateSpinning ? spinSpeed : 0);
+  if (tagPlate) tagPlate.rotation.y += spinDelta;
+
+  // standing on the spinning plate turns you with it - and can throw you off balance
+  const distFromCenter = Math.hypot(camera.position.x, camera.position.z);
+  if (plateSpinning && !playerSeated && !taggerIsPlayer && distFromCenter < 10) {
+    yaw -= spinDelta;
+    tagWobbleTimer = (tagWobbleTimer || 0) - dt;
+    if (tagWobbleTimer <= 0) {
+      tagWobbleTimer = 1.5 + Math.random() * 2;
+      if (Math.random() < 0.35) {
+        pitch += (Math.random() - 0.5) * 0.15; // a stumble - jolts your view briefly
+        logMsg('휘청! 균형을 잃을 뻔했습니다.');
+      }
+    }
+  }
+
   plateTimer -= dt;
   if (plateTimer <= 0) {
     if (plateSpinning) {
@@ -1000,6 +1026,20 @@ function updateTagMode(dt) {
 
   for (const bot of tagBots) {
     if (!bot.alive) continue;
+
+    // the spinning plate throws unseated bots off balance too - ongoing attrition
+    // toward a last-one-standing finish, separate from the tagger
+    if (plateSpinning && !bot.seated && !bot.isTagger) {
+      bot.wobbleTimer = (bot.wobbleTimer || Math.random() * 3) - dt;
+      if (bot.wobbleTimer <= 0) {
+        bot.wobbleTimer = 1.5 + Math.random() * 2.5;
+        if (Math.random() < 0.12) {
+          eliminateTagBot(bot);
+          logMsg('한 명이 균형을 잃고 판에서 떨어졌습니다!');
+          continue;
+        }
+      }
+    }
 
     if (bot.isTagger) {
       // chase the nearest unseated, un-eliminated target (player or another bot)
@@ -1071,15 +1111,17 @@ function showTagResults() {
   document.exitPointerLock && document.exitPointerLock();
   const seatedCount = tagChairs.filter(c => c.occupied).length;
   const eliminatedCount = tagBots.filter(b => !b.alive).length;
+  const wasLastStanding = !taggerIsPlayer && !playerEliminated && !playerSeated;
+  let title = '게임 종료';
   let playerLine;
   if (taggerIsPlayer) playerLine = `당신은 술래로 ${eliminatedCount}명을 탈락시켰습니다.`;
-  else if (playerEliminated) playerLine = '당신은 술래에게 잡혀 탈락했습니다.';
-  else if (playerSeated) playerLine = '당신은 의자에 앉아 생존했습니다!';
-  else playerLine = '당신은 끝까지 살아남았습니다!';
+  else if (playerEliminated) playerLine = '당신은 술래에게 잡히거나 균형을 잃어 탈락했습니다.';
+  else if (wasLastStanding) { title = '최후의 1인 승리!'; playerLine = '끝까지 살아남은 최후의 1인입니다! 승리!'; }
+  else playerLine = '당신은 의자에 앉아 생존했습니다!';
 
   overlay.classList.remove('hidden');
   overlay.innerHTML = `
-    <h1>게임 종료</h1>
+    <h1>${title}</h1>
     <p style="font-size:18px;">${playerLine}</p>
     <p>생존(의자 착석): ${seatedCount}명 / 탈락: ${eliminatedCount}명</p>
     <button id="tagAgainBtn" style="margin-top:16px; padding:10px 20px; font-size:16px;">모드 선택으로</button>
