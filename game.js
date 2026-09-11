@@ -402,11 +402,16 @@ function showModeSelect() {
         <div style="font-size:20px; font-weight:bold;">무궁화 꽃</div>
         <div style="font-size:12px; opacity:0.8; margin-top:8px;">어두운 교실 탈출<br>빨간불에 움직이면 탈락</div>
       </div>
+      <div id="modeElevator" class="item-btn" style="width:160px; height:140px; flex-direction:column;">
+        <div style="font-size:20px; font-weight:bold;">엘리베이터</div>
+        <div style="font-size:12px; opacity:0.8; margin-top:8px;">둥근 방, 엘리베이터 5대<br>코딱지와 벨루가 주의!</div>
+      </div>
     </div>
   `;
   overlay.querySelector('#modeNormal').onclick = () => { gameMode = 'NORMAL'; startNormalMode(); };
   overlay.querySelector('#modeVariant').onclick = () => { gameMode = 'VARIANT'; showLobby(); };
   overlay.querySelector('#modeTag').onclick = () => { gameMode = 'TAG'; startTagMode(); };
+  overlay.querySelector('#modeElevator').onclick = () => { gameMode = 'ELEVATOR'; startElevatorMode(); };
   overlay.querySelector('#modeRedlight').onclick = () => { gameMode = 'REDLIGHT'; startRedlightMode(); };
 }
 
@@ -744,6 +749,7 @@ function resetNormalModeVisuals() {
   collidables = [];
   resetTagModeVisuals();
   resetRedlightVisuals();
+  resetElevatorVisuals();
   scene.fog = new THREE.FogExp2(0xbfbfc2, 0.012);
   scene.background = new THREE.Color(0xbfbfc2);
 }
@@ -1154,6 +1160,24 @@ let rlEscaped = false;
 let rlEliminated = false;
 let rlResultShown = false;
 
+/* ------------------------------ ELEVATOR MODE (엘리베이터 게임) ------------------------------ */
+const ELEV_ROOM_RADIUS = 17;
+const ELEV_COUNT = 5;
+const ELEV_DOOR_OPEN_TIME = 3;
+const ELEV_COIDKKOJI_DELAY = 30;
+let elevGroup = null;
+let elevators = [];       // { angle, pos, doorL, doorR, state:'closed'|'open', timer }
+let elevBots = [];        // wandering "friends" { mesh, vel }
+let coidkkoji = [];       // { mesh, vel, bouncePhase }
+let elevBeluga = null;    // { mesh, vel }
+let bumperModeActive = false;
+let elevElapsed = 0;
+let elevCoidkkojiSpawned = false;
+let playerVel = null;     // knockback velocity, THREE.Vector3
+let ridingElevator = null; // index into elevators[], or null
+let elevRideTimer = 0;
+let elevInterior = null;  // the small interior-view group, shown while riding
+
 function resetRedlightVisuals() {
   if (rlGroup) { scene.remove(rlGroup); rlGroup = null; }
   rlDoll = null;
@@ -1362,6 +1386,345 @@ function updateRedlightHud() {
     ${nextLabel}: ${Math.max(0, rlTimer).toFixed(1)}초<br>
     남은 거리: ${Math.max(0, Math.round(camera.position.z - (rlDoll ? rlDoll.position.z + 3 : 0)))}m<br>
     <span style="opacity:0.7; font-size:12px;">책상에 부딪히면 인형이 바로 돌아봅니다!</span>
+  `;
+}
+
+function resetElevatorVisuals() {
+  if (elevGroup) { scene.remove(elevGroup); elevGroup = null; }
+  if (elevInterior) { scene.remove(elevInterior); elevInterior = null; }
+  elevators = [];
+  elevBots = [];
+  coidkkoji = [];
+  elevBeluga = null;
+  ridingElevator = null;
+}
+
+function buildElevatorPod(angle) {
+  const g = new THREE.Group();
+  const pos = new THREE.Vector3(Math.cos(angle) * ELEV_ROOM_RADIUS, 0, Math.sin(angle) * ELEV_ROOM_RADIUS);
+  const frameMat = new THREE.MeshStandardMaterial({ color: 0x888888, metalness: 0.5, roughness: 0.4 });
+  const frame = new THREE.Mesh(new THREE.BoxGeometry(3.2, 4, 1), frameMat);
+  frame.position.copy(pos);
+  frame.lookAt(0, 0, 0);
+  g.add(frame);
+  const doorMat = new THREE.MeshStandardMaterial({ color: 0xcccccc, metalness: 0.6, roughness: 0.3 });
+  const doorL = new THREE.Mesh(new THREE.BoxGeometry(1.5, 3.6, 0.2), doorMat);
+  const doorR = new THREE.Mesh(new THREE.BoxGeometry(1.5, 3.6, 0.2), doorMat);
+  const inward = new THREE.Vector3(-pos.x, 0, -pos.z).normalize();
+  const tangent = new THREE.Vector3(-inward.z, 0, inward.x);
+  const doorBasePos = pos.clone().addScaledVector(inward, 0.6);
+  doorL.position.copy(doorBasePos);
+  doorR.position.copy(doorBasePos);
+  doorL.lookAt(0, 0, 0);
+  doorR.lookAt(0, 0, 0);
+  g.add(doorL, doorR);
+  const light = new THREE.Mesh(new THREE.SphereGeometry(0.15, 8, 8), new THREE.MeshBasicMaterial({ color: 0xff3333 }));
+  light.position.copy(pos).addScaledVector(inward, 0.6);
+  light.position.y = 2.3;
+  g.add(light);
+  scene.add(g);
+  return { angle, pos, g, doorL, doorR, doorBasePos, tangent, light, state: 'closed', timer: 2 + Math.random() * 5 };
+}
+
+function buildElevInteriorView() {
+  const g = new THREE.Group();
+  const wallMat = new THREE.MeshStandardMaterial({ color: 0xaaaaaa, metalness: 0.4 });
+  const floorMesh = new THREE.Mesh(new THREE.BoxGeometry(3, 0.2, 3), wallMat);
+  floorMesh.position.set(1000, -0.1, 1000);
+  g.add(floorMesh);
+  const wallGeo = new THREE.BoxGeometry(3, 3.5, 0.15);
+  [[0, -1.5], [0, 1.5], [-1.5, 0], [1.5, 0]].forEach(([dx, dz], i) => {
+    const w = new THREE.Mesh(wallGeo, wallMat);
+    w.position.set(1000 + dx, 1.6, 1000 + dz);
+    if (i >= 2) w.rotation.y = Math.PI / 2;
+    g.add(w);
+  });
+  const light = new THREE.PointLight(0xffffff, 1.2, 8);
+  light.position.set(1000, 3, 1000);
+  g.add(light);
+  scene.add(g);
+  return g;
+}
+
+function spawnElevBot(color) {
+  const mesh = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.35, 0.9, 4, 8), new THREE.MeshStandardMaterial({ color }));
+  mesh.add(body);
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.27, 8, 8), new THREE.MeshStandardMaterial({ color: 0xddc9a3 }));
+  head.position.y = 0.9;
+  mesh.add(head);
+  const ang = Math.random() * Math.PI * 2;
+  const dist = Math.random() * (ELEV_ROOM_RADIUS - 3);
+  mesh.position.set(Math.cos(ang) * dist, 1, Math.sin(ang) * dist);
+  scene.add(mesh);
+  elevBots.push({ mesh, vel: new THREE.Vector3((Math.random() - 0.5) * 1.5, 0, (Math.random() - 0.5) * 1.5) });
+}
+
+function spawnCoidkkoji() {
+  const count = 4 + Math.floor(Math.random() * 3);
+  for (let i = 0; i < count; i++) {
+    const mesh = new THREE.Mesh(
+      new THREE.SphereGeometry(1.1, 12, 12),
+      new THREE.MeshStandardMaterial({ color: 0x8fae4a, roughness: 0.8 })
+    );
+    const ang = Math.random() * Math.PI * 2;
+    const dist = Math.random() * (ELEV_ROOM_RADIUS - 3);
+    mesh.position.set(Math.cos(ang) * dist, 1.1, Math.sin(ang) * dist);
+    scene.add(mesh);
+    const vAng = Math.random() * Math.PI * 2;
+    coidkkoji.push({
+      mesh, vel: new THREE.Vector3(Math.cos(vAng) * 3, 0, Math.sin(vAng) * 3), bouncePhase: Math.random() * 10,
+    });
+  }
+  logMsg('아주 큰 코딱지들이 나타났습니다! 조심하세요!');
+}
+
+function startElevatorMode() {
+  overlay.classList.add('hidden');
+  crosshair.style.display = 'block';
+  phase = 'ELEVATOR_PLAYING';
+
+  for (const t of teams) if (t.towerGroup) scene.remove(t.towerGroup);
+  teams = [];
+  for (const b of bots) scene.remove(b.mesh);
+  bots = [];
+  for (const d of dyingBots) scene.remove(d.mesh);
+  dyingBots = [];
+  duelers = [];
+  resetElevatorVisuals();
+
+  floor.material.color.set(0x9a9a9e);
+  for (const b of obstacleBoxes) b.visible = false;
+  collidables = [];
+  scene.fog = new THREE.FogExp2(0xbfbfc2, 0.02);
+  scene.background = new THREE.Color(0xbfbfc2);
+
+  weapon = null;
+  updateWeaponModels();
+  elevElapsed = 0;
+  elevCoidkkojiSpawned = false;
+  bumperModeActive = false;
+  playerVel = new THREE.Vector3();
+  ridingElevator = null;
+  elevRideTimer = 0;
+  msgLog = [];
+
+  elevGroup = new THREE.Group();
+  scene.add(elevGroup);
+
+  // the round room's own spinning plate
+  const plateMat = new THREE.MeshStandardMaterial({ color: 0x777788, metalness: 0.3, roughness: 0.6 });
+  tagPlate = new THREE.Mesh(new THREE.CylinderGeometry(ELEV_ROOM_RADIUS - 1, ELEV_ROOM_RADIUS - 1, 0.3, 48), plateMat);
+  tagPlate.position.y = 0.03;
+  const stripeMat = new THREE.MeshStandardMaterial({ color: 0x444455 });
+  for (let i = 0; i < 10; i++) {
+    const stripe = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.32, ELEV_ROOM_RADIUS - 1), stripeMat);
+    stripe.rotation.y = (i / 10) * Math.PI * 2;
+    tagPlate.add(stripe);
+  }
+  elevGroup.add(tagPlate);
+  plateSpinning = true;
+  plateTimer = 999999; // this plate just spins continuously in this mode
+
+  // the round wall
+  const wallMat = new THREE.MeshStandardMaterial({ color: 0x555560, side: THREE.DoubleSide });
+  const wall = new THREE.Mesh(new THREE.CylinderGeometry(ELEV_ROOM_RADIUS, ELEV_ROOM_RADIUS, 5, 48, 1, true), wallMat);
+  wall.position.y = 2.5;
+  elevGroup.add(wall);
+
+  for (let i = 0; i < ELEV_COUNT; i++) {
+    elevators.push(buildElevatorPod((i / ELEV_COUNT) * Math.PI * 2));
+  }
+  elevInterior = buildElevInteriorView();
+  elevInterior.visible = false;
+
+  for (let i = 0; i < 7; i++) spawnElevBot(new THREE.Color().setHSL(Math.random(), 0.5, 0.5));
+
+  // the beluga, wandering near the center
+  const belugaMesh = new THREE.Group();
+  const belugaBody = new THREE.Mesh(new THREE.CapsuleGeometry(0.9, 2, 6, 10), new THREE.MeshStandardMaterial({ color: 0xe8eef2 }));
+  belugaBody.rotation.z = Math.PI / 2;
+  belugaMesh.add(belugaBody);
+  const fin = new THREE.Mesh(new THREE.ConeGeometry(0.4, 0.7, 6), new THREE.MeshStandardMaterial({ color: 0xd8e0e6 }));
+  fin.position.set(0, 0.9, 0);
+  belugaMesh.add(fin);
+  belugaMesh.position.set(0, 1, 0);
+  elevGroup.add(belugaMesh);
+  elevBeluga = { mesh: belugaMesh, vel: new THREE.Vector3(1.5, 0, 1.2) };
+
+  camera.position.set(0, 1.7, ELEV_ROOM_RADIUS - 3);
+  yaw = 0; pitch = 0;
+  logMsg('둥근 방에 오신 걸 환영합니다! 엘리베이터가 열리면 E키로 탑승하세요.');
+  requestPointerLock();
+}
+
+function reflectOffRoomWall(entPos, vel) {
+  const d = Math.hypot(entPos.x, entPos.z);
+  if (d > ELEV_ROOM_RADIUS - 1.2) {
+    const nx = entPos.x / d, nz = entPos.z / d;
+    entPos.x = nx * (ELEV_ROOM_RADIUS - 1.2);
+    entPos.z = nz * (ELEV_ROOM_RADIUS - 1.2);
+    const dot = vel.x * nx + vel.z * nz;
+    vel.x -= 2 * dot * nx;
+    vel.z -= 2 * dot * nz;
+  }
+}
+
+function tryEnterElevator() {
+  if (ridingElevator !== null) {
+    // exit early, back at the elevator's doorway
+    const el = elevators[ridingElevator];
+    camera.position.set(el.pos.x * 0.85, 1.7, el.pos.z * 0.85);
+    ridingElevator = null;
+    elevInterior.visible = false;
+    logMsg('엘리베이터에서 내렸습니다.');
+    return;
+  }
+  for (let i = 0; i < elevators.length; i++) {
+    const el = elevators[i];
+    if (el.state !== 'open') continue;
+    const dx = camera.position.x - el.pos.x, dz = camera.position.z - el.pos.z;
+    if (Math.sqrt(dx * dx + dz * dz) < 3) {
+      ridingElevator = i;
+      elevRideTimer = ELEV_DOOR_OPEN_TIME;
+      elevInterior.visible = true;
+      camera.position.set(1000, 1.7, 1000);
+      logMsg('엘리베이터에 탑승했습니다.');
+      SFX.itemUse();
+      return;
+    }
+  }
+}
+
+function updateElevatorMode(dt) {
+  elevElapsed += dt;
+
+  // the spinning plate + camera spin (same feel as Tag mode), unless riding the elevator
+  if (tagPlate) tagPlate.rotation.y += dt * 2.4;
+  if (ridingElevator === null) {
+    const distFromCenter = Math.hypot(camera.position.x, camera.position.z);
+    if (distFromCenter < ELEV_ROOM_RADIUS - 1) yaw -= dt * 2.4;
+  }
+
+  // elevator door cycles: closed (traveling) -> open for 3s -> closes again
+  for (const el of elevators) {
+    el.timer -= dt;
+    if (el.timer <= 0) {
+      if (el.state === 'closed') {
+        el.state = 'open';
+        el.timer = ELEV_DOOR_OPEN_TIME;
+        el.light.material.color.set(0x33ff66);
+      } else {
+        el.state = 'closed';
+        el.timer = 3 + Math.random() * 6;
+        el.light.material.color.set(0xff3333);
+        if (ridingElevator === elevators.indexOf(el)) {
+          // door closed while riding - ride ends, dropped back off
+          ridingElevator = null;
+          elevInterior.visible = false;
+          camera.position.set(el.pos.x * 0.85, 1.7, el.pos.z * 0.85);
+          logMsg('엘리베이터 문이 열리고 내렸습니다.');
+        }
+      }
+    }
+    const openAmt = el.state === 'open' ? Math.min(1, (ELEV_DOOR_OPEN_TIME - el.timer) * 2) : 0;
+    const slide = Math.max(0, Math.min(1, openAmt)) * 0.85;
+    el.doorL.position.copy(el.doorBasePos).addScaledVector(el.tangent, slide);
+    el.doorR.position.copy(el.doorBasePos).addScaledVector(el.tangent, -slide);
+  }
+
+  if (ridingElevator !== null) {
+    elevRideTimer -= dt;
+    updateElevatorHud();
+    return; // frozen inside the elevator interior view - no room hazards apply
+  }
+
+  // player knockback velocity (from coidkkoji / bumper-mode collisions) decays and moves the camera
+  if (playerVel.lengthSq() > 0.0001) {
+    camera.position.x += playerVel.x * dt;
+    camera.position.z += playerVel.z * dt;
+    playerVel.multiplyScalar(0.9);
+    reflectOffRoomWall(camera.position, playerVel);
+  }
+
+  // wandering friends
+  for (const bot of elevBots) {
+    bot.mesh.position.x += bot.vel.x * dt;
+    bot.mesh.position.z += bot.vel.z * dt;
+    reflectOffRoomWall(bot.mesh.position, bot.vel);
+    if (Math.random() < 0.01) { bot.vel.x += (Math.random() - 0.5); bot.vel.z += (Math.random() - 0.5); }
+  }
+
+  // the beluga wanders; touching it flips on bumper mode for everyone
+  if (elevBeluga) {
+    elevBeluga.mesh.position.x += elevBeluga.vel.x * dt;
+    elevBeluga.mesh.position.z += elevBeluga.vel.z * dt;
+    reflectOffRoomWall(elevBeluga.mesh.position, elevBeluga.vel);
+    if (Math.random() < 0.02) { elevBeluga.vel.x += (Math.random() - 0.5) * 2; elevBeluga.vel.z += (Math.random() - 0.5) * 2; }
+    const bd = camera.position.distanceTo(elevBeluga.mesh.position);
+    if (bd < 1.6 && !bumperModeActive) {
+      bumperModeActive = true;
+      logMsg('벨루가에게 닿았습니다! 모두가 서로 부딪히면 튕겨나가는 모드로 전환됩니다!');
+      SFX.teamSwap();
+    }
+  }
+
+  // coidkkoji: spawn after 30s, bounce around like bouncy balls
+  if (!elevCoidkkojiSpawned && elevElapsed >= ELEV_COIDKKOJI_DELAY) {
+    elevCoidkkojiSpawned = true;
+    spawnCoidkkoji();
+  }
+  for (const c of coidkkoji) {
+    c.bouncePhase += dt * 6;
+    c.mesh.position.x += c.vel.x * dt;
+    c.mesh.position.z += c.vel.z * dt;
+    c.mesh.position.y = 1.1 + Math.abs(Math.sin(c.bouncePhase)) * 0.8;
+    reflectOffRoomWall(c.mesh.position, c.vel);
+    // always bumps the player, regardless of beluga/bumper mode
+    const dx = camera.position.x - c.mesh.position.x, dz = camera.position.z - c.mesh.position.z;
+    const d = Math.sqrt(dx * dx + dz * dz);
+    if (d < 1.6 && d > 0.001) {
+      const nx = dx / d, nz = dz / d;
+      playerVel.x += nx * 6; playerVel.z += nz * 6;
+      c.vel.x -= nx * 3; c.vel.z -= nz * 3;
+      logMsg('코딱지에 부딪혀 튕겨나갔습니다!');
+    }
+  }
+
+  // bumper mode: everyone (player + friends) bounces off each other on contact
+  if (bumperModeActive) {
+    const all = [{ pos: camera.position, vel: playerVel }, ...elevBots.map(b => ({ pos: b.mesh.position, vel: b.vel }))];
+    for (let i = 0; i < all.length; i++) {
+      for (let j = i + 1; j < all.length; j++) {
+        const dx = all[i].pos.x - all[j].pos.x, dz = all[i].pos.z - all[j].pos.z;
+        const d = Math.sqrt(dx * dx + dz * dz);
+        if (d < 1.2 && d > 0.001) {
+          const nx = dx / d, nz = dz / d;
+          all[i].vel.x += nx * 3; all[i].vel.z += nz * 3;
+          all[j].vel.x -= nx * 3; all[j].vel.z -= nz * 3;
+        }
+      }
+    }
+  }
+
+  updateElevatorHud();
+}
+
+function updateElevatorHud() {
+  if (ridingElevator !== null) {
+    hud.innerHTML = `
+      모드: 엘리베이터<br>
+      <b style="color:#88ccff">엘리베이터 내부</b><br>
+      E: 내리기
+    `;
+    return;
+  }
+  const openCount = elevators.filter(e => e.state === 'open').length;
+  hud.innerHTML = `
+    모드: 엘리베이터<br>
+    열린 엘리베이터: ${openCount} / ${ELEV_COUNT} (근처에서 E)<br>
+    ${elevCoidkkojiSpawned ? '<b style="color:#8fae4a">코딱지 출현!</b>' : `코딱지 출현까지: ${Math.max(0, ELEV_COIDKKOJI_DELAY - elevElapsed).toFixed(0)}초`}<br>
+    ${bumperModeActive ? '<b style="color:#ff9933">범퍼 모드 활성화!</b>' : '벨루가를 조심하세요'}
   `;
 }
 
@@ -1638,12 +2001,12 @@ function spawnPlayer(nearPos) {
 }
 
 /* ------------------------------ INPUT ------------------------------ */
-function isPlayingPhase() { return phase === 'PLAYING' || phase === 'NORMAL_PLAYING' || phase === 'TAG_PLAYING' || phase === 'REDLIGHT_PLAYING'; }
+function isPlayingPhase() { return phase === 'PLAYING' || phase === 'NORMAL_PLAYING' || phase === 'TAG_PLAYING' || phase === 'REDLIGHT_PLAYING' || phase === 'ELEVATOR_PLAYING'; }
 
 window.addEventListener('keydown', (e) => {
   keys[e.code] = true;
   if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault(); // stop page scroll
-  if (e.code === 'KeyM' && (phase === 'NORMAL_PLAYING' || phase === 'TAG_PLAYING' || phase === 'REDLIGHT_PLAYING' || phase === 'LOBBY')) {
+  if (e.code === 'KeyM' && (phase === 'NORMAL_PLAYING' || phase === 'TAG_PLAYING' || phase === 'REDLIGHT_PLAYING' || phase === 'ELEVATOR_PLAYING' || phase === 'LOBBY')) {
     document.exitPointerLock && document.exitPointerLock();
     showModeSelect();
     return;
@@ -1651,6 +2014,10 @@ window.addEventListener('keydown', (e) => {
   if (!isPlayingPhase()) return;
   if (phase === 'TAG_PLAYING') {
     if (e.code === 'KeyE') sitInNearbyChair();
+    return;
+  }
+  if (phase === 'ELEVATOR_PLAYING') {
+    if (e.code === 'KeyE') tryEnterElevator();
     return;
   }
   if (e.code === 'Digit1') toggleWeapon('gun');
@@ -2363,7 +2730,7 @@ function updatePlayer(dt) {
   if (keys['KeyA'] || keys['ArrowLeft']) move.sub(right);
   if (keys['KeyD'] || keys['ArrowRight']) move.add(right);
   if (move.lengthSq() > 0) move.normalize().multiplyScalar(speed * dt);
-  camera.position.add(move);
+  if (!(phase === 'ELEVATOR_PLAYING' && ridingElevator !== null)) camera.position.add(move);
 
   // jump: a ninja-like hop, so you can close distance and kick over enemies' heads
   if (isPlayingPhase()) {
@@ -2374,12 +2741,22 @@ function updatePlayer(dt) {
   }
 
   // simple bounds
-  const bound = (phase === 'NORMAL_PLAYING' || phase === 'TAG_PLAYING' || phase === 'REDLIGHT_PLAYING') ? NORMAL_BOUNDS : 95;
+  const bound = (phase === 'NORMAL_PLAYING' || phase === 'TAG_PLAYING' || phase === 'REDLIGHT_PLAYING' || phase === 'ELEVATOR_PLAYING') ? NORMAL_BOUNDS : 95;
   camera.position.x = Math.max(-bound, Math.min(bound, camera.position.x));
   camera.position.z = Math.max(-bound, Math.min(bound, camera.position.z));
 
   // walls, furniture, and chairs block movement instead of letting the player walk through them
-  if (phase === 'NORMAL_PLAYING' || phase === 'TAG_PLAYING' || phase === 'REDLIGHT_PLAYING') pushOutOfCollidables(camera.position);
+  if (phase === 'NORMAL_PLAYING' || phase === 'TAG_PLAYING' || phase === 'REDLIGHT_PLAYING' || phase === 'ELEVATOR_PLAYING') pushOutOfCollidables(camera.position);
+
+  // elevator mode: the round room wall keeps the player inside, unless currently riding an elevator
+  if (phase === 'ELEVATOR_PLAYING' && ridingElevator === null) {
+    const d = Math.hypot(camera.position.x, camera.position.z);
+    if (d > ELEV_ROOM_RADIUS - 1.2) {
+      const nx = camera.position.x / d, nz = camera.position.z / d;
+      camera.position.x = nx * (ELEV_ROOM_RADIUS - 1.2);
+      camera.position.z = nz * (ELEV_ROOM_RADIUS - 1.2);
+    }
+  }
 
   // Team factory towers: solid on the outside, but each has a doorway (facing the
   // arena center) you can walk through, and walking toward the middle climbs the
@@ -2504,6 +2881,11 @@ function animate() {
     updatePlayer(dt);
     updateRedlightMode(dt);
     updateRedlightHud();
+  }
+
+  if (phase === 'ELEVATOR_PLAYING') {
+    updatePlayer(dt);
+    updateElevatorMode(dt);
   }
 
   renderer.render(scene, camera);
