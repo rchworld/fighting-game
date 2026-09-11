@@ -745,12 +745,18 @@ let taggerBot = null;
 let playerSeated = false;
 let playerEliminated = false;
 let tagResultShown = false;
+let tagPlate = null;
+let plateSpinning = true;
+let plateTimer = 0;
+let playerCarrying = null; // a tagChairs entry, or null
 
 function resetTagModeVisuals() {
   for (const c of tagChairs) scene.remove(c.mesh);
   tagChairs = [];
   for (const b of tagBots) scene.remove(b.mesh);
   tagBots = [];
+  if (tagPlate) { scene.remove(tagPlate); tagPlate = null; }
+  playerCarrying = null;
 }
 
 function buildChairMesh() {
@@ -830,7 +836,16 @@ function startTagMode() {
   tagResultShown = false;
   msgLog = [];
 
-  // chairs in a ring at the center of the arena
+  // the spinning plate (turntable) at the arena center - chairs sit on its edge
+  const plateMat = new THREE.MeshStandardMaterial({ color: 0xaa7733, metalness: 0.3, roughness: 0.6 });
+  tagPlate = new THREE.Mesh(new THREE.CylinderGeometry(10, 10, 0.4, 40), plateMat);
+  tagPlate.position.y = 0.05;
+  scene.add(tagPlate);
+  plateSpinning = true;
+  plateTimer = 5 + Math.random() * 3;
+
+  // chairs in a ring at the center of the arena - each blocks movement while sitting
+  // on the ground, but not while being carried (it follows its carrier instead)
   for (let i = 0; i < TAG_CHAIR_COUNT; i++) {
     const ang = (i / TAG_CHAIR_COUNT) * Math.PI * 2;
     const pos = new THREE.Vector3(Math.cos(ang) * 8, 0, Math.sin(ang) * 8);
@@ -839,9 +854,11 @@ function startTagMode() {
     mesh.lookAt(0, 0, 0);
     scene.add(mesh);
     addCollidableBox(pos.x, pos.z, 0.8, 0.8);
-    tagChairs.push({ mesh, pos, occupied: false, occupant: null });
+    const box = collidables[collidables.length - 1];
+    tagChairs.push({ mesh, pos, occupied: false, occupant: null, carriedBy: null, box });
   }
 
+  playerCarrying = null;
   for (let i = 0; i < TAG_BOT_COUNT; i++) spawnTagBot();
 
   // randomly pick one of the 20 participants (player included) to be the tagger
@@ -853,7 +870,7 @@ function startTagMode() {
     taggerIsPlayer = false;
     taggerBot = tagBots[pick - 1];
     markBotAsTagger(taggerBot);
-    logMsg('술래가 정해졌습니다! 의자로 도망가서 E키를 눌러 앉으세요.');
+    logMsg('술래가 정해졌습니다! 의자를 E키로 들고 있다가, 판이 멈추면 자동으로 앉습니다.');
   }
 
   requestPointerLock();
@@ -861,17 +878,56 @@ function startTagMode() {
 
 function sitInNearbyChair() {
   if (taggerIsPlayer || playerSeated || playerEliminated) return;
+  if (playerCarrying) {
+    // put it back down wherever it currently is
+    const chair = playerCarrying;
+    chair.pos = chair.mesh.position.clone();
+    if (chair.box) {
+      chair.box.minX = chair.pos.x - 0.8; chair.box.maxX = chair.pos.x + 0.8;
+      chair.box.minZ = chair.pos.z - 0.8; chair.box.maxZ = chair.pos.z + 0.8;
+    }
+    chair.carriedBy = null;
+    playerCarrying = null;
+    logMsg('의자를 내려놓았습니다.');
+    return;
+  }
   for (const chair of tagChairs) {
-    if (chair.occupied) continue;
+    if (chair.occupied || chair.carriedBy) continue;
     const dx = camera.position.x - chair.pos.x, dz = camera.position.z - chair.pos.z;
-    if (Math.sqrt(dx * dx + dz * dz) < 2.2) {
-      chair.occupied = true;
-      chair.occupant = 'player';
-      playerSeated = true;
-      logMsg('의자에 앉았습니다! 안전합니다.');
+    if (Math.sqrt(dx * dx + dz * dz) < 2.5) {
+      chair.carriedBy = 'player';
+      playerCarrying = chair;
+      logMsg('의자를 들었습니다! 판이 멈추면 자동으로 앉습니다.');
       SFX.itemUse();
       return;
     }
+  }
+}
+
+// when the spinning plate stops, everyone currently carrying a chair sits in it
+function seatAllCarriers() {
+  for (const chair of tagChairs) {
+    if (!chair.carriedBy) continue;
+    // sit right where they're standing when the plate stops, not back at the chair's
+    // original spot - the chair mesh already tracks the carrier's current position
+    chair.pos = chair.mesh.position.clone();
+    if (chair.box) {
+      chair.box.minX = chair.pos.x - 0.8; chair.box.maxX = chair.pos.x + 0.8;
+      chair.box.minZ = chair.pos.z - 0.8; chair.box.maxZ = chair.pos.z + 0.8;
+    }
+    chair.occupied = true;
+    chair.occupant = chair.carriedBy;
+    if (chair.carriedBy === 'player') {
+      playerSeated = true;
+      playerCarrying = null;
+      logMsg('판이 멈췄습니다! 의자에 앉아 안전해졌습니다.');
+    } else {
+      const bot = chair.carriedBy;
+      bot.seated = true;
+      bot.carryingChair = null;
+      bot.mesh.position.set(chair.pos.x, 1, chair.pos.z);
+    }
+    chair.carriedBy = null;
   }
 }
 
@@ -879,12 +935,41 @@ function eliminateTagBot(bot) {
   if (!bot.alive) return;
   bot.alive = false;
   scene.remove(bot.mesh);
-  const chair = tagChairs.find(c => c.occupant === bot);
-  if (chair) { chair.occupied = false; chair.occupant = null; }
+  const chair = tagChairs.find(c => c.occupant === bot || c.carriedBy === bot);
+  if (chair) { chair.occupied = false; chair.occupant = null; chair.carriedBy = null; }
 }
 
 function updateTagMode(dt) {
   if (tagResultShown) return;
+
+  // the spinning plate: spins for a while, then briefly stops - anyone carrying a
+  // chair at that instant sits down safely
+  if (tagPlate) tagPlate.rotation.y += dt * (plateSpinning ? 3.2 : 0);
+  plateTimer -= dt;
+  if (plateTimer <= 0) {
+    if (plateSpinning) {
+      plateSpinning = false;
+      plateTimer = 1.8;
+      seatAllCarriers();
+      SFX.matchStart();
+      logMsg('판이 멈췄다!');
+    } else {
+      plateSpinning = true;
+      plateTimer = 5 + Math.random() * 3;
+      logMsg('판이 다시 돌아갑니다.');
+    }
+  }
+
+  // carried chairs follow their carrier and stop blocking movement while carried
+  for (const chair of tagChairs) {
+    if (chair.box) chair.box.skip = !!chair.carriedBy;
+    if (chair.carriedBy === 'player') {
+      const fwd = new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw)).multiplyScalar(-1);
+      chair.mesh.position.set(camera.position.x + fwd.x * 1.2, 0, camera.position.z + fwd.z * 1.2);
+    } else if (chair.carriedBy) {
+      chair.mesh.position.set(chair.carriedBy.mesh.position.x, 0, chair.carriedBy.mesh.position.z);
+    }
+  }
 
   // player-controlled tagger: touching any unseated bot eliminates it
   if (taggerIsPlayer && !playerEliminated) {
@@ -933,20 +1018,19 @@ function updateTagMode(dt) {
     }
 
     if (bot.seated) continue;
+    if (bot.carryingChair) continue; // holding a chair, waiting for the plate to stop
 
-    // non-tagger bots flee toward the nearest empty chair
+    // non-tagger bots go pick up the nearest available (unoccupied, uncarried) chair
     let nearestChair = null, nearestDist = Infinity;
     for (const chair of tagChairs) {
-      if (chair.occupied) continue;
+      if (chair.occupied || chair.carriedBy) continue;
       const d = chair.pos.distanceTo(bot.mesh.position);
       if (d < nearestDist) { nearestDist = d; nearestChair = chair; }
     }
     if (nearestChair) {
       if (nearestDist < 1.5) {
-        nearestChair.occupied = true;
-        nearestChair.occupant = bot;
-        bot.seated = true;
-        bot.mesh.position.set(nearestChair.pos.x, 1, nearestChair.pos.z);
+        nearestChair.carriedBy = bot;
+        bot.carryingChair = nearestChair;
       } else {
         const toChair = new THREE.Vector3().subVectors(nearestChair.pos, bot.mesh.position);
         toChair.y = 0;
@@ -990,11 +1074,13 @@ function showTagResults() {
 }
 
 function updateTagHud() {
+  const carryLine = taggerIsPlayer ? '' : playerCarrying ? 'E: 의자 내려놓기 (판이 멈추면 자동으로 앉습니다)<br>' : 'E: 근처 의자 들기<br>';
   hud.innerHTML = `
     모드: 술래잡기<br>
-    역할: ${taggerIsPlayer ? '<b style="color:#ff5533">술래</b>' : (playerSeated ? '앉음(안전)' : playerEliminated ? '탈락' : '도망 중')}<br>
-    ${taggerIsPlayer ? '' : 'E: 근처 의자에 앉기<br>'}
-    남은 의자: ${tagChairs.filter(c => !c.occupied).length} / ${TAG_CHAIR_COUNT}
+    역할: ${taggerIsPlayer ? '<b style="color:#ff5533">술래</b>' : (playerSeated ? '앉음(안전)' : playerEliminated ? '탈락' : playerCarrying ? '의자를 들고 있음' : '도망 중')}<br>
+    판: ${plateSpinning ? '<b style="color:#ffcc44">빙글빙글 도는 중</b>' : '<b style="color:#33ff66">멈춤!</b>'}<br>
+    ${carryLine}
+    남은 의자: ${tagChairs.filter(c => !c.occupied && !c.carriedBy).length} / ${TAG_CHAIR_COUNT}
   `;
 }
 
