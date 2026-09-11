@@ -64,10 +64,14 @@ let playerClimb = 0; // 0..1, how far up a tower's stairway the player currently
 let jumpHeight = 0, jumpVel = 0; // Space bar jump physics
 let collidables = []; // { minX, maxX, minZ, maxZ, skip? } - walls/furniture/chairs the player can't walk through
 
-function addCollidableBox(cx, cz, halfW, halfD) {
-  collidables.push({ minX: cx - halfW, maxX: cx + halfW, minZ: cz - halfD, maxZ: cz + halfD });
+function addCollidableBox(cx, cz, halfW, halfD, tag) {
+  collidables.push({ minX: cx - halfW, maxX: cx + halfW, minZ: cz - halfD, maxZ: cz + halfD, tag });
 }
+let justHitCollidable = false;
+let justHitTag = null;
 function pushOutOfCollidables(pos) {
+  justHitCollidable = false;
+  justHitTag = null;
   for (const box of collidables) {
     if (box.skip) continue;
     if (pos.x < box.minX || pos.x > box.maxX || pos.z < box.minZ || pos.z > box.maxZ) continue;
@@ -78,6 +82,8 @@ function pushOutOfCollidables(pos) {
     else if (min === dRight) pos.x = box.maxX;
     else if (min === dFront) pos.z = box.minZ;
     else pos.z = box.maxZ;
+    justHitCollidable = true;
+    justHitTag = box.tag;
   }
 }
 const TOWER_COLLISION_RADIUS = 8; // spacious interior
@@ -1175,7 +1181,7 @@ function startRedlightMode() {
       const desk = new THREE.Mesh(new THREE.BoxGeometry(1.6, 1, 1), deskMat);
       desk.position.set(col * 3, 0.5, row * 5);
       rlGroup.add(desk);
-      addCollidableBox(col * 3, row * 5, 0.9, 0.6);
+      addCollidableBox(col * 3, row * 5, 0.9, 0.6, 'desk');
     }
   }
 
@@ -1187,6 +1193,22 @@ function startRedlightMode() {
   const dollHead = new THREE.Mesh(new THREE.SphereGeometry(0.55, 12, 12), new THREE.MeshStandardMaterial({ color: 0xffe0b0 }));
   dollHead.position.y = 2.9;
   rlDoll.add(dollHead);
+
+  // a face on the front of the head (+Z side), so it reads as "looking at you" when turned around
+  const eyeMat = new THREE.MeshStandardMaterial({ color: 0x111111 });
+  [-0.18, 0.18].forEach(ex => {
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.07, 8, 8), eyeMat);
+    eye.position.set(ex, 3.0, 0.5);
+    rlDoll.add(eye);
+  });
+  const nose = new THREE.Mesh(new THREE.ConeGeometry(0.06, 0.16, 8), new THREE.MeshStandardMaterial({ color: 0xffcc99 }));
+  nose.rotation.x = Math.PI / 2;
+  nose.position.set(0, 2.87, 0.54);
+  rlDoll.add(nose);
+  const mouth = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.05, 0.05), new THREE.MeshStandardMaterial({ color: 0x992222 }));
+  mouth.position.set(0, 2.72, 0.52);
+  rlDoll.add(mouth);
+
   rlDoll.position.set(0, 0, -RL_CLASSROOM_LEN / 2 + 3);
   rlDoll.rotation.y = Math.PI; // facing away from the player at first (green light)
   rlGroup.add(rlDoll);
@@ -1215,6 +1237,13 @@ function startRedlightMode() {
 
 function updateRedlightMode(dt) {
   if (rlResultShown) return;
+
+  // bumping a desk makes noise - the doll whips around instantly, cutting green light short
+  if (rlLightGreen && justHitCollidable && justHitTag === 'desk') {
+    rlTimer = 0;
+    logMsg('쿵! 책상 부딪히는 소리에 인형이 홱 돌아봅니다!');
+    SFX.eliminate();
+  }
 
   rlTimer -= dt;
   if (rlTimer <= 0) {
@@ -1284,10 +1313,13 @@ function showRedlightResults() {
 }
 
 function updateRedlightHud() {
+  const nextLabel = rlLightGreen ? '인형이 돌아볼 때까지' : '다시 움직일 수 있을 때까지';
   hud.innerHTML = `
     모드: 무궁화 꽃이 피었습니다<br>
     신호: ${rlLightGreen ? '<b style="color:#33ff66">초록불 (이동 가능)</b>' : '<b style="color:#ff3333">빨간불 (정지!)</b>'}<br>
-    남은 거리: ${Math.max(0, Math.round(camera.position.z - (rlDoll ? rlDoll.position.z + 3 : 0)))}m
+    ${nextLabel}: ${Math.max(0, rlTimer).toFixed(1)}초<br>
+    남은 거리: ${Math.max(0, Math.round(camera.position.z - (rlDoll ? rlDoll.position.z + 3 : 0)))}m<br>
+    <span style="opacity:0.7; font-size:12px;">책상에 부딪히면 인형이 바로 돌아봅니다!</span>
   `;
 }
 
