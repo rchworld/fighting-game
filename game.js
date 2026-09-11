@@ -392,11 +392,16 @@ function showModeSelect() {
         <div style="font-size:20px; font-weight:bold;">술래잡기</div>
         <div style="font-size:12px; opacity:0.8; margin-top:8px;">20명, 의자 19개<br>술래에게 닿으면 탈락</div>
       </div>
+      <div id="modeRedlight" class="item-btn" style="width:160px; height:140px; flex-direction:column;">
+        <div style="font-size:20px; font-weight:bold;">무궁화 꽃</div>
+        <div style="font-size:12px; opacity:0.8; margin-top:8px;">어두운 교실 탈출<br>빨간불에 움직이면 탈락</div>
+      </div>
     </div>
   `;
   overlay.querySelector('#modeNormal').onclick = () => { gameMode = 'NORMAL'; startNormalMode(); };
   overlay.querySelector('#modeVariant').onclick = () => { gameMode = 'VARIANT'; showLobby(); };
   overlay.querySelector('#modeTag').onclick = () => { gameMode = 'TAG'; startTagMode(); };
+  overlay.querySelector('#modeRedlight').onclick = () => { gameMode = 'REDLIGHT'; startRedlightMode(); };
 }
 
 /* ------------------------------ NORMAL MODE (총과 칼만 있는 단순 난투) ------------------------------ */
@@ -732,6 +737,9 @@ function resetNormalModeVisuals() {
   bots = bots.filter(b => !b.mesh || b.teamKey !== 'enemy');
   collidables = [];
   resetTagModeVisuals();
+  resetRedlightVisuals();
+  scene.fog = new THREE.FogExp2(0xbfbfc2, 0.012);
+  scene.background = new THREE.Color(0xbfbfc2);
 }
 
 /* ------------------------------ TAG MODE (술래잡기 + 매직 체어) ------------------------------ */
@@ -1084,6 +1092,205 @@ function updateTagHud() {
   `;
 }
 
+/* ------------------------------ RED LIGHT GREEN LIGHT (무궁화 꽃이 피었습니다) ------------------------------ */
+const RL_CLASSROOM_LEN = 55;   // player starts at the back, doll/exit at the front
+const RL_CLASSROOM_WIDE = 24;
+const RL_MOVE_TOLERANCE = 0.08; // how far you can drift during red light before it counts as "moving"
+let rlGroup = null;
+let rlDoll = null;
+let rlBots = [];
+let rlLightGreen = true;
+let rlTimer = 0;
+let rlLastPos = null;
+let rlEscaped = false;
+let rlEliminated = false;
+let rlResultShown = false;
+
+function resetRedlightVisuals() {
+  if (rlGroup) { scene.remove(rlGroup); rlGroup = null; }
+  rlDoll = null;
+  rlBots = [];
+}
+
+function buildClassmateMesh(color) {
+  const mesh = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.35, 0.9, 4, 8), new THREE.MeshStandardMaterial({ color }));
+  mesh.add(body);
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.27, 8, 8), new THREE.MeshStandardMaterial({ color: 0xddc9a3 }));
+  head.position.y = 0.9;
+  mesh.add(head);
+  return mesh;
+}
+
+function startRedlightMode() {
+  overlay.classList.add('hidden');
+  crosshair.style.display = 'block';
+  phase = 'REDLIGHT_PLAYING';
+
+  for (const t of teams) if (t.towerGroup) scene.remove(t.towerGroup);
+  teams = [];
+  for (const b of bots) scene.remove(b.mesh);
+  bots = [];
+  for (const d of dyingBots) scene.remove(d.mesh);
+  dyingBots = [];
+  duelers = [];
+  resetRedlightVisuals();
+
+  floor.material.color.set(0x151016);
+  for (const b of obstacleBoxes) b.visible = false;
+  collidables = [];
+  scene.fog = new THREE.FogExp2(0x0a0810, 0.035);
+  scene.background = new THREE.Color(0x0a0810);
+
+  weapon = null;
+  updateWeaponModels();
+  rlLightGreen = true;
+  rlTimer = 2.5 + Math.random() * 2;
+  rlEscaped = false;
+  rlEliminated = false;
+  rlResultShown = false;
+  msgLog = [];
+
+  rlGroup = new THREE.Group();
+  const darkWallMat = new THREE.MeshStandardMaterial({ color: 0x1c1620 });
+  const wallH = 8;
+  const walls = [
+    { w: RL_CLASSROOM_WIDE, h: wallH, d: 1, pos: [0, wallH / 2, -RL_CLASSROOM_LEN / 2] },
+    { w: RL_CLASSROOM_WIDE, h: wallH, d: 1, pos: [0, wallH / 2, RL_CLASSROOM_LEN / 2] },
+    { w: 1, h: wallH, d: RL_CLASSROOM_LEN, pos: [-RL_CLASSROOM_WIDE / 2, wallH / 2, 0] },
+    { w: 1, h: wallH, d: RL_CLASSROOM_LEN, pos: [RL_CLASSROOM_WIDE / 2, wallH / 2, 0] },
+  ];
+  walls.forEach(w => {
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(w.w, w.h, w.d), darkWallMat);
+    mesh.position.set(w.pos[0], w.pos[1], w.pos[2]);
+    rlGroup.add(mesh);
+    addCollidableBox(w.pos[0], w.pos[2], w.w / 2, w.d / 2);
+  });
+
+  // rows of desks between the player's start and the doll at the front
+  const deskMat = new THREE.MeshStandardMaterial({ color: 0x2a2018 });
+  for (let row = -1; row <= 4; row++) {
+    for (let col = -3; col <= 3; col++) {
+      if (col === 0) continue; // leave a center aisle
+      const desk = new THREE.Mesh(new THREE.BoxGeometry(1.6, 1, 1), deskMat);
+      desk.position.set(col * 3, 0.5, row * 5);
+      rlGroup.add(desk);
+      addCollidableBox(col * 3, row * 5, 0.9, 0.6);
+    }
+  }
+
+  // the doll, standing at the front facing away (green light)
+  rlDoll = new THREE.Group();
+  const dollBody = new THREE.Mesh(new THREE.CylinderGeometry(0.6, 0.8, 2.6, 12), new THREE.MeshStandardMaterial({ color: 0xffcc55 }));
+  dollBody.position.y = 1.3;
+  rlDoll.add(dollBody);
+  const dollHead = new THREE.Mesh(new THREE.SphereGeometry(0.55, 12, 12), new THREE.MeshStandardMaterial({ color: 0xffe0b0 }));
+  dollHead.position.y = 2.9;
+  rlDoll.add(dollHead);
+  rlDoll.position.set(0, 0, -RL_CLASSROOM_LEN / 2 + 3);
+  rlDoll.rotation.y = Math.PI; // facing away from the player at first (green light)
+  rlGroup.add(rlDoll);
+
+  // dim flickering light near the doll, otherwise the room is nearly pitch black
+  const dollLight = new THREE.PointLight(0xffaa66, 1.2, 20);
+  dollLight.position.set(0, 3, -RL_CLASSROOM_LEN / 2 + 3);
+  rlGroup.add(dollLight);
+
+  // classmates trying to escape alongside the player
+  for (let i = 0; i < 6; i++) {
+    const mesh = buildClassmateMesh(new THREE.Color().setHSL(Math.random(), 0.3, 0.35));
+    mesh.position.set((Math.random() - 0.5) * (RL_CLASSROOM_WIDE - 4), 1, RL_CLASSROOM_LEN / 2 - 4 - Math.random() * 6);
+    rlGroup.add(mesh);
+    rlBots.push({ mesh, alive: true, escaped: false });
+  }
+
+  scene.add(rlGroup);
+
+  camera.position.set(0, 1.7, RL_CLASSROOM_LEN / 2 - 3);
+  yaw = Math.PI; pitch = 0; // face -Z, toward the doll at the front
+  rlLastPos = camera.position.clone();
+  logMsg('무궁화 꽃이 피었습니다... 초록불엔 움직이고, 빨간불엔 멈추세요!');
+  requestPointerLock();
+}
+
+function updateRedlightMode(dt) {
+  if (rlResultShown) return;
+
+  rlTimer -= dt;
+  if (rlTimer <= 0) {
+    rlLightGreen = !rlLightGreen;
+    rlDoll.rotation.y = rlLightGreen ? Math.PI : 0; // faces the player during red light
+    if (rlLightGreen) {
+      rlTimer = 2.5 + Math.random() * 2.5;
+      logMsg('무궁화 꽃이 피었습니다... (초록불)');
+    } else {
+      rlTimer = 1.8 + Math.random() * 1.7;
+      rlLastPos.copy(camera.position);
+      logMsg('정지! (빨간불)');
+      SFX.matchStart();
+    }
+  }
+
+  if (!rlLightGreen) {
+    const moved = Math.hypot(camera.position.x - rlLastPos.x, camera.position.z - rlLastPos.z);
+    if (moved > RL_MOVE_TOLERANCE) {
+      rlEliminated = true;
+      logMsg('들켰습니다... 탈락!');
+      SFX.eliminate();
+      showRedlightResults();
+      return;
+    }
+  }
+  rlLastPos.copy(camera.position);
+
+  // classmates: shuffle toward the doll during green, freeze during red
+  for (const bot of rlBots) {
+    if (!bot.alive || bot.escaped) continue;
+    if (rlLightGreen) {
+      const toDoll = new THREE.Vector3(0 - bot.mesh.position.x, 0, rlDoll.position.z - bot.mesh.position.z);
+      toDoll.y = 0;
+      if (toDoll.length() > 1) {
+        toDoll.normalize().multiplyScalar(dt * 1.8);
+        bot.mesh.position.add(toDoll);
+      }
+    }
+    if (bot.mesh.position.z < rlDoll.position.z + 3) {
+      bot.escaped = true;
+      scene.remove(bot.mesh);
+    }
+  }
+
+  // reaching the doll's area = escaped
+  if (camera.position.z < rlDoll.position.z + 3) {
+    rlEscaped = true;
+    showRedlightResults();
+  }
+}
+
+function showRedlightResults() {
+  if (rlResultShown) return;
+  rlResultShown = true;
+  document.exitPointerLock && document.exitPointerLock();
+  const escapedFriends = rlBots.filter(b => b.escaped).length;
+  const line = rlEscaped ? '탈출에 성공했습니다!' : '술래에게 들켜 탈락했습니다...';
+  overlay.classList.remove('hidden');
+  overlay.innerHTML = `
+    <h1>${rlEscaped ? '탈출 성공' : '게임 종료'}</h1>
+    <p style="font-size:18px;">${line}</p>
+    <p>함께 탈출한 친구: ${escapedFriends}명</p>
+    <button id="rlAgainBtn" style="margin-top:16px; padding:10px 20px; font-size:16px;">모드 선택으로</button>
+  `;
+  overlay.querySelector('#rlAgainBtn').onclick = showModeSelect;
+}
+
+function updateRedlightHud() {
+  hud.innerHTML = `
+    모드: 무궁화 꽃이 피었습니다<br>
+    신호: ${rlLightGreen ? '<b style="color:#33ff66">초록불 (이동 가능)</b>' : '<b style="color:#ff3333">빨간불 (정지!)</b>'}<br>
+    남은 거리: ${Math.max(0, Math.round(camera.position.z - (rlDoll ? rlDoll.position.z + 3 : 0)))}m
+  `;
+}
+
 function showLobby() {
   phase = 'LOBBY';
   crosshair.style.display = 'none';
@@ -1357,12 +1564,12 @@ function spawnPlayer(nearPos) {
 }
 
 /* ------------------------------ INPUT ------------------------------ */
-function isPlayingPhase() { return phase === 'PLAYING' || phase === 'NORMAL_PLAYING' || phase === 'TAG_PLAYING'; }
+function isPlayingPhase() { return phase === 'PLAYING' || phase === 'NORMAL_PLAYING' || phase === 'TAG_PLAYING' || phase === 'REDLIGHT_PLAYING'; }
 
 window.addEventListener('keydown', (e) => {
   keys[e.code] = true;
   if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault(); // stop page scroll
-  if (e.code === 'KeyM' && (phase === 'NORMAL_PLAYING' || phase === 'TAG_PLAYING' || phase === 'LOBBY')) {
+  if (e.code === 'KeyM' && (phase === 'NORMAL_PLAYING' || phase === 'TAG_PLAYING' || phase === 'REDLIGHT_PLAYING' || phase === 'LOBBY')) {
     document.exitPointerLock && document.exitPointerLock();
     showModeSelect();
     return;
@@ -2093,12 +2300,12 @@ function updatePlayer(dt) {
   }
 
   // simple bounds
-  const bound = (phase === 'NORMAL_PLAYING' || phase === 'TAG_PLAYING') ? NORMAL_BOUNDS : 95;
+  const bound = (phase === 'NORMAL_PLAYING' || phase === 'TAG_PLAYING' || phase === 'REDLIGHT_PLAYING') ? NORMAL_BOUNDS : 95;
   camera.position.x = Math.max(-bound, Math.min(bound, camera.position.x));
   camera.position.z = Math.max(-bound, Math.min(bound, camera.position.z));
 
   // walls, furniture, and chairs block movement instead of letting the player walk through them
-  if (phase === 'NORMAL_PLAYING' || phase === 'TAG_PLAYING') pushOutOfCollidables(camera.position);
+  if (phase === 'NORMAL_PLAYING' || phase === 'TAG_PLAYING' || phase === 'REDLIGHT_PLAYING') pushOutOfCollidables(camera.position);
 
   // Team factory towers: solid on the outside, but each has a doorway (facing the
   // arena center) you can walk through, and walking toward the middle climbs the
@@ -2217,6 +2424,12 @@ function animate() {
     updatePlayer(dt);
     updateTagMode(dt);
     updateTagHud();
+  }
+
+  if (phase === 'REDLIGHT_PLAYING') {
+    updatePlayer(dt);
+    updateRedlightMode(dt);
+    updateRedlightHud();
   }
 
   renderer.render(scene, camera);
